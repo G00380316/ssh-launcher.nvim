@@ -2,8 +2,17 @@ local M = {}
 
 local config_path = vim.fn.stdpath("config") .. "/ssh_launcher/hosts.json"
 
+-- Helper function to get index of a value in a table
+local function tbl_index_of(tbl, val)
+    for i, v in ipairs(tbl) do
+        if v == val then return i end
+    end
+    return nil
+end
+
 local function load_hosts()
-    local f = io.open(config_path, "r")
+    local path = vim.fn.stdpath("data") .. "/ssh_launcher/hosts.json"
+    local f = io.open(path, "r")
     if not f then return {} end
     local content = f:read("*a")
     f:close()
@@ -24,7 +33,7 @@ function M.launch_ssh()
 
     vim.ui.select(entries, { prompt = "Select SSH host:" }, function(choice)
         if not choice then return end
-        local index = vim.tbl_index_of(entries, choice)
+        local index = tbl_index_of(entries, choice)
         local h = hosts[index]
         if not h then return end
         local cmd = string.format("ssh -i %s %s@%s", h.key, h.user, h.host)
