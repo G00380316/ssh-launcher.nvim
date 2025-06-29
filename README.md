@@ -18,7 +18,7 @@ A minimal SSH launcher plugin for Neovim with UI selection and `ssh-add` support
 {
   "G00380316/ssh-launcher.nvim",
   lazy = true,
-  cmd = { "SshLauncher", "SshAddKey" },
+  cmd = { "SshLauncher", "SshAddKey", "SshEditKey" },
   config = function()
     require("ssh_launcher").setup()
   end,
@@ -28,6 +28,7 @@ A minimal SSH launcher plugin for Neovim with UI selection and `ssh-add` support
 ## 🚀 Usage
 
 * `:SshAddKey` – Launches a UI prompt to add a new SSH connection.
+* `:SshEditKey` – Opens a UI selection for saved connections and starts a terminal SSH session.
 * `:SshLauncher` – Opens a UI selection for saved connections and starts a terminal SSH session.
 
 ## 🛠 Planned Features
