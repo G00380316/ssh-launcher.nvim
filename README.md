@@ -10,7 +10,7 @@ A minimal SSH launcher plugin for Neovim with UI selection and `ssh-add` support
 * JSON schema validation
 * Edit and delete SSH configs interactively
 * Opens connections in Neovim terminal tab
-* Saved SSH configs stored at `~/.config/nvim/sshlauncher/hosts.json`
+* Saved SSH configs stored at `~/.local/nvim/ssh_launcher/hosts.json`
 
 ## 📦 Installation (Lazy.nvim)
 
@@ -32,9 +32,8 @@ A minimal SSH launcher plugin for Neovim with UI selection and `ssh-add` support
 
 ## 🛠 Planned Features
 
-* [x] JSON schema validation of saved config
-* [x] Add/edit/delete SSH configs from UI
-* [ ] Telescope integration (optional)
+* [ ] Add/edit/delete SSH configs from UI
+* [ ] Telescope integration
 * [ ] Encrypted config (GPG)
 
 ## 📁 Config Format
@@ -53,10 +52,9 @@ A minimal SSH launcher plugin for Neovim with UI selection and `ssh-add` support
 ## 📌 Notes
 
 * SSH connections are opened in a new Neovim terminal tab.
-* Configuration stored locally at `~/.config/nvim/sshlauncher/hosts.json`
+* Configuration stored locally at `~/.local/nvim/ssh_launcher/hosts.json`
 * Ensure the private key path is accessible and permissions are correct.
 
 ---
 
 Feel free to contribute or submit issues at [github.com/G00380316/ssh-launcher.nvim](https://github.com/G00380316/ssh-launcher.nvim)
-
