@@ -1,6 +1,6 @@
 local M = {}
 
-local config_path = vim.fn.stdpath("data") .. "/ssh_launcher"
+local config_path = vim.fn.stdpath("data") .. "/ssh_launcher/hosts.json"
 
 local function get_index(tbl, val)
     for i, v in ipairs(tbl) do
