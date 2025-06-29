@@ -1,10 +1,10 @@
 local M = {}
 
-local config_path = vim.fn.stdpath("data") .. "/ssh_launcher"
+local config_path = vim.fn.stdpath("data") .. "/ssh_launcher/hosts.json"
 local config_file = config_path .. "/hosts.json"
 
 local function load_hosts()
-    local f = io.open(config_path, "r")
+    local f = io.open(config_file, "r")
     if not f then return {} end
     local content = f:read("*a")
     f:close()
@@ -14,7 +14,7 @@ end
 
 -- helper to write to config
 local function save_hosts(hosts)
-    vim.fn.mkdir(data_dir, "p")
+    vim.fn.mkdir(config_path, "p")
     local f = io.open(config_file, "w")
     if f then
         f:write(vim.json.encode(hosts))
