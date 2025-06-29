@@ -1,6 +1,6 @@
 local M = {}
 
-local config_path = vim.fn.stdpath("data") .. "/ssh_launcher/hosts.json"
+local config_path = vim.fn.stdpath("data") .. "/ssh_launcher"
 local config_file = data_dir .. "/hosts.json"
 
 local function load_hosts()
