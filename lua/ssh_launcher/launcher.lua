@@ -34,7 +34,7 @@ function M.launch_ssh()
         local index = get_index(entries, choice)
         local h = hosts[index]
         if not h then return end
-        local cmd = string.format("ssh -i %s %s@%s", h.key, h.user, h.host)
+        local cmd = string.format("ssh -i %s -o StrictHostKeyChecking=no %s@%s", h.key, h.user, h.host)
         vim.cmd("tabnew | terminal " .. cmd)
     end)
 end
