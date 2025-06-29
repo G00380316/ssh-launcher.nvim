@@ -1,6 +1,5 @@
 local M = {}
 
--- Custom replacement for vim.tbl_index_of
 local function tbl_index_of(tbl, val)
   for i, v in ipairs(tbl) do
     if v == val then return i end
@@ -31,7 +30,7 @@ function M.launch_ssh()
 
   vim.ui.select(entries, { prompt = "Select SSH host:" }, function(choice)
     if not choice then return end
-    local index = tbl_index_of(entries, choice) -- ✅ Replace with custom function
+    local index = tbl_index_of(entries, choice) -- ✅ Using our custom function
     local h = hosts[index]
     if not h then return end
     local cmd = string.format("ssh -i %s %s@%s", h.key, h.user, h.host)
