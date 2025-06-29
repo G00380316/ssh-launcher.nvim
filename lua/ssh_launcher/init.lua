@@ -10,7 +10,7 @@ function M.setup()
     end, {})
 
     vim.api.nvim_create_user_command("SshEditKey", function()
-        require("ssh_launcher.editkey").editkey()
+        require("ssh_launcher.editkey").edit_key()
     end, {})
 end
 
