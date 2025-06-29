@@ -1,6 +1,6 @@
 local M = {}
 
-local function tbl_index_of(tbl, val)
+local function get_index(tbl, val)
   for i, v in ipairs(tbl) do
     if v == val then return i end
   end
@@ -9,12 +9,12 @@ end
 
 local function load_hosts()
   local path = vim.fn.stdpath("data") .. "/ssh_launcher/hosts.json"
-  local f = io.open(path, "r")
-  if not f then return {} end
-  local content = f:read("*a")
-  f:close()
-  local ok, result = pcall(vim.json.decode, content)
-  return ok and result or {}
+  local file = io.open(path, "r")
+  if not file then return {} end
+  local content = file:read("*a")
+  file:close()
+  local ok, decoded = pcall(vim.json.decode, content)
+  return ok and decoded or {}
 end
 
 function M.launch_ssh()
@@ -30,13 +30,17 @@ function M.launch_ssh()
 
   vim.ui.select(entries, { prompt = "Select SSH host:" }, function(choice)
     if not choice then return end
-    local index = tbl_index_of(entries, choice) -- ✅ Using our custom function
+
+    local index = get_index(entries, choice) -- ✅ Use local `get_index`
     local h = hosts[index]
-    if not h then return end
+    if not h then
+      vim.notify("Invalid selection", vim.log.levels.ERROR)
+      return
+    end
+
     local cmd = string.format("ssh -i %s %s@%s", h.key, h.user, h.host)
     vim.cmd("tabnew | terminal " .. cmd)
   end)
 end
 
 return M
-
