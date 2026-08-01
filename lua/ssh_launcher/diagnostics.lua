@@ -126,7 +126,9 @@ local function rule_name(ctx)
             severity = "hint",
             field = "name",
             message = ("%q is also a Host alias in ssh_config"):format(h.name),
-            detail = "Not an error, but `ssh " .. h.name .. "` outside Neovim will use the ssh_config entry, "
+            detail = "Not an error, but `ssh "
+              .. h.name
+              .. "` outside Neovim will use the ssh_config entry, "
               .. "which may point somewhere else.",
           })
         else
@@ -443,8 +445,10 @@ local function rule_key(ctx)
       severity = "error",
       field = "identity_file",
       message = ("%s is a PuTTY .ppk key"):format(shown),
-      detail = ("OpenSSH cannot read it. Convert once with:\n"
-        .. "    puttygen %s -O private-openssh -o %s"):format(shown, (shown:gsub("%.ppk$", "")) .. ".pem"),
+      detail = ("OpenSSH cannot read it. Convert once with:\n" .. "    puttygen %s -O private-openssh -o %s"):format(
+        shown,
+        (shown:gsub("%.ppk$", "")) .. ".pem"
+      ),
     })
   end
 
@@ -464,8 +468,7 @@ local function rule_key(ctx)
       severity = "error",
       field = "identity_file",
       message = ("Key %s is mode %s — too open"):format(shown, info.mode or "?"),
-      detail = "ssh refuses private keys that group or others can read: "
-        .. "'WARNING: UNPROTECTED PRIVATE KEY FILE'.",
+      detail = "ssh refuses private keys that group or others can read: " .. "'WARNING: UNPROTECTED PRIVATE KEY FILE'.",
       fix = cfg.security.offer_permission_fix and {
         label = "chmod 600",
         apply = function(host)
@@ -695,7 +698,8 @@ local function rule_options(ctx)
         severity = "warn",
         field = "options",
         message = ("ssh does not know the option %q"):format(key),
-        detail = suggestion and ("Did you mean %s?"):format(suggestion) or "ssh will refuse to start with a bad option.",
+        detail = suggestion and ("Did you mean %s?"):format(suggestion)
+          or "ssh will refuse to start with a bad option.",
         fix = suggestion and {
           label = ("rename to %s"):format(suggestion),
           apply = function(host)

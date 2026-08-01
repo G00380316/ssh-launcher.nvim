@@ -296,8 +296,11 @@ local function validate(opts)
   for path, allowed in pairs(enums) do
     local value = get_path(opts, path)
     if value ~= nil and not vim.tbl_contains(allowed, value) then
-      problems[#problems + 1] =
-        ("%s = %q is not one of: %s (using default)"):format(path, tostring(value), table.concat(allowed, ", "))
+      problems[#problems + 1] = ("%s = %q is not one of: %s (using default)"):format(
+        path,
+        tostring(value),
+        table.concat(allowed, ", ")
+      )
       set_path(opts, path, get_path(M.defaults, path))
     end
   end

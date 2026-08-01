@@ -8,16 +8,21 @@ all: lint test
 test:
 	@$(NVIM) --headless -u NONE -l tests/run.lua
 
+# CI checks the same paths; keep the two in step or formatting drifts back in.
+SOURCES = lua tests plugin
+
+# Fall back to npx so `make lint` and `make format` work without a global
+# install — an unformatted push is otherwise only caught in CI.
+STYLUA = $(shell command -v stylua 2>/dev/null || echo "npx --yes @johnnymorganz/stylua-bin@latest")
+
 lint:
-	@command -v stylua >/dev/null 2>&1 \
-		&& stylua --check lua tests \
-		|| echo "stylua not installed; skipping"
+	@$(STYLUA) --check $(SOURCES)
 	@command -v luacheck >/dev/null 2>&1 \
-		&& luacheck lua tests --globals vim \
+		&& luacheck $(SOURCES) \
 		|| echo "luacheck not installed; skipping"
 
 format:
-	@stylua lua tests
+	@$(STYLUA) $(SOURCES)
 
 # Regenerate helptags so :help ssh-launcher works from a checkout.
 docs:

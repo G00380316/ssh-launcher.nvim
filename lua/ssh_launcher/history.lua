@@ -52,16 +52,17 @@ local function persist()
   if not config.get().history.enable then
     return
   end
-  flush = flush or util.debounce(function()
-    local cfg = config.get()
-    local list = M.load()
-    local max = cfg.history.max_entries or 1000
-    if #list > max then
-      list = vim.list_slice(list, #list - max + 1, #list)
-      entries = list
-    end
-    util.write_file_atomic(path(), util.json_pretty(list) .. "\n", tonumber("600", 8))
-  end, 500)
+  flush = flush
+    or util.debounce(function()
+      local cfg = config.get()
+      local list = M.load()
+      local max = cfg.history.max_entries or 1000
+      if #list > max then
+        list = vim.list_slice(list, #list - max + 1, #list)
+        entries = list
+      end
+      util.write_file_atomic(path(), util.json_pretty(list) .. "\n", tonumber("600", 8))
+    end, 500)
   flush()
 end
 

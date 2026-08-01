@@ -97,9 +97,12 @@ local function check_permissions()
     end
   end
   if #bad > 0 then
-    warn(("%d private key(s) are readable by others"):format(#bad), vim.list_extend(bad, {
-      "ssh refuses keys with loose permissions. Open the manager and press f to fix them.",
-    }))
+    warn(
+      ("%d private key(s) are readable by others"):format(#bad),
+      vim.list_extend(bad, {
+        "ssh refuses keys with loose permissions. Open the manager and press f to fix them.",
+      })
+    )
   else
     ok("every discovered private key is mode 0600 or tighter")
   end
@@ -162,9 +165,12 @@ local function check_hosts()
   end
 
   if totals.error > 0 then
-    error(("%d host(s) have blocking problems"):format(#broken), vim.list_extend(broken, {
-      "Open the manager and press D on a host for the details, f to repair.",
-    }))
+    error(
+      ("%d host(s) have blocking problems"):format(#broken),
+      vim.list_extend(broken, {
+        "Open the manager and press D on a host for the details, f to repair.",
+      })
+    )
   elseif totals.warn > 0 then
     warn(("%d warning(s) across your hosts"):format(totals.warn), {
       "Run :Ssh diagnose for the full list.",

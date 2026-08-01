@@ -38,7 +38,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           version: latest
-          args: --check lua tests
+          args: --check lua tests plugin
 
   docs:
     runs-on: ubuntu-latest

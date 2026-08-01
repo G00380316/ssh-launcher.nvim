@@ -84,10 +84,29 @@ suite("modules")
 
 test("every module loads", function()
   for _, name in ipairs({
-    "util", "log", "config", "host", "store", "parser", "sshconfig", "keys",
-    "agent", "probe", "diagnostics", "terminal", "history", "connect", "health",
-    "ui.theme", "ui.float", "ui.render", "ui.dialog", "ui.form", "ui.help",
-    "ui.manager", "ui.picker",
+    "util",
+    "log",
+    "config",
+    "host",
+    "store",
+    "parser",
+    "sshconfig",
+    "keys",
+    "agent",
+    "probe",
+    "diagnostics",
+    "terminal",
+    "history",
+    "connect",
+    "health",
+    "ui.theme",
+    "ui.float",
+    "ui.render",
+    "ui.dialog",
+    "ui.form",
+    "ui.help",
+    "ui.manager",
+    "ui.picker",
   }) do
     local ok, err = pcall(require, "ssh_launcher." .. name)
     truthy(ok, ("require ssh_launcher.%s failed: %s"):format(name, err))
@@ -143,12 +162,22 @@ local PARSE_CASES = {
   {
     input = [[ssh -i "~/.ssh/lab.pem" ec2-user@ec2-3-8-1-2.eu-west-2.compute.amazonaws.com]],
     kind = "ssh-command",
-    expect = { user = "ec2-user", host = "ec2-3-8-1-2.eu-west-2.compute.amazonaws.com", identity_file = "~/.ssh/lab.pem" },
+    expect = {
+      user = "ec2-user",
+      host = "ec2-3-8-1-2.eu-west-2.compute.amazonaws.com",
+      identity_file = "~/.ssh/lab.pem",
+    },
   },
   {
     input = [[$ ssh -p 2222 -J bastion.corp.net deploy@10.0.4.12 'journalctl -fu api']],
     kind = "ssh-command",
-    expect = { user = "deploy", host = "10.0.4.12", port = 2222, proxy_jump = "bastion.corp.net", remote_command = "journalctl -fu api" },
+    expect = {
+      user = "deploy",
+      host = "10.0.4.12",
+      port = 2222,
+      proxy_jump = "bastion.corp.net",
+      remote_command = "journalctl -fu api",
+    },
   },
   {
     input = "ssh://deploy@app-01.internal:2222/srv/app",
@@ -498,10 +527,13 @@ test("parses host blocks, skipping wildcards and Match", function()
 end)
 
 test("exports into a managed block without touching the rest", function()
-  local ok, content = sshconfig.export({ Host.normalize({ name = "web", host = "1.2.3.4", user = "root", port = 2222 }) }, {
-    path = TMP .. "/ssh_config",
-    dry_run = true,
-  })
+  local ok, content = sshconfig.export(
+    { Host.normalize({ name = "web", host = "1.2.3.4", user = "root", port = 2222 }) },
+    {
+      path = TMP .. "/ssh_config",
+      dry_run = true,
+    }
+  )
   truthy(ok)
   contains(content, "Host web")
   contains(content, "Host bastion")
@@ -637,10 +669,7 @@ test("commands and completion work through the user-command layer", function()
 
   local ssh = require("ssh_launcher")
   truthy(#ssh._complete("", "Ssh ") > 5, "subcommand completion")
-  truthy(
-    vim.tbl_contains(ssh._complete("", "Ssh connect "), "deploy@web-01.example.com"),
-    "host-name completion"
-  )
+  truthy(vim.tbl_contains(ssh._complete("", "Ssh connect "), "deploy@web-01.example.com"), "host-name completion")
 
   vim.cmd("Ssh list")
   vim.cmd("silent! only")

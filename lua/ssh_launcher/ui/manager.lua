@@ -363,7 +363,8 @@ function Manager:draw_preview()
       (h.use_count or 0) == 1 and "" or "s"
     )
     if p then
-      local detail = p.status == "up" and ("%s, %dms"):format(probe.LABEL.up, p.latency_ms or 0) or probe.LABEL[p.status]
+      local detail = p.status == "up" and ("%s, %dms"):format(probe.LABEL.up, p.latency_ms or 0)
+        or probe.LABEL[p.status]
       facts[#facts + 1] = ("network: %s"):format(detail or p.status)
     end
     lines[#lines + 1] = { { "  " .. table.concat(facts, "   ·   "), theme.hl("Muted") } }
@@ -387,7 +388,7 @@ function Manager:draw_preview()
           { "  " .. theme.icon(theme.SEVERITY_ICON[issue.severity] or "info") .. " ", hl },
           { theme.word(issue.severity) .. ": ", hl },
           { issue.message, theme.hl("Value") },
-          { issue.fix and ("   [f fixes this]") or "", theme.hl("KeyHint") },
+          { issue.fix and "   [f fixes this]" or "", theme.hl("KeyHint") },
         }
       end
       if #issues > shown then
@@ -830,11 +831,9 @@ function Manager:import()
           return log.warn("no hosts found in ~/.ssh/config")
         end
         local added, skipped = store.import(hosts)
-        log.info(("imported %d host%s from ssh_config (%d already known)"):format(
-          added,
-          added == 1 and "" or "s",
-          skipped
-        ))
+        log.info(
+          ("imported %d host%s from ssh_config (%d already known)"):format(added, added == 1 and "" or "s", skipped)
+        )
         self:refresh({ reload = true })
       elseif value == "json" then
         dialog.input({ prompt = "JSON file: ", default = "", completion = "file" }, function(path)

@@ -632,7 +632,8 @@ function M.debounce(fn, ms)
         fn(unpack(args))
       end)
     )
-  end, cancel
+  end,
+    cancel
 end
 
 ---@class ssh_launcher.SystemResult
