@@ -1,61 +1,255 @@
 # ssh-launcher.nvim
 
-A minimal SSH launcher plugin for Neovim with UI selection and `ssh-add` support.
+An SSH connection manager for Neovim. Store your fleet, paste connection
+strings from anywhere, and find out *why* a connection will fail before you
+waste a login attempt on it.
 
-## ✨ Features
+```
+┌ Hosts  6/8   prod ───────────────────────────────────────────────────────┐
+│    NAME                  TARGET                     KEY        TAGS      │
+│  ✓ prod-api-eu           deploy@10.0.4.12:2222      prod       prod,eu   │
+│  ✓ prod-api-us           deploy@10.8.1.9:2222       prod       prod,us   │
+│  ✗ prod-db-primary       postgres@10.0.9.2          agent      prod      │
+│  ? bastion               jump@bastion.corp.net      id_ed…     infra     │
+└──────────────────────────────────────────────────────────────────────────┘
+┌ Details ─────────────────────────────────────────────────────────────────┐
+│  prod-db-primary   postgres@10.0.9.2                                     │
+│  key: from ssh-agent · used: 2026-07-30 14:02 (23 times) · refused       │
+│  $ ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new …       │
+│  ✗ error: Key ~/.ssh/db is mode 0644 — too open      [f fixes this]      │
+└──────────────────────────────────────────────────────────────────────────┘
+```
 
-* `:SshLauncher` – Select from your defined SSH connections
-* `:SshAddKey` – Adds your private key to the SSH agent
-* Prompted SSH config creation (name, user, host, key path)
-* JSON schema validation
-* Edit and delete SSH configs interactively
-* Opens connections in Neovim terminal tab
-* Saved SSH configs stored at `~/.local/nvim/ssh_launcher/hosts.json`
+## Why
 
-## 📦 Installation (Lazy.nvim)
+Three things go wrong with SSH in an editor, and this fixes all three.
+
+**Getting details in is tedious.** Everyone copies `ssh -i "key.pem"
+ec2-user@ec2-3-8-1-2.compute.amazonaws.com` out of a console or a runbook.
+Paste it — the whole line — into one field and every other field fills in. Also
+understood: `ssh://` URLs, `user@host:port`, `scp`/`rsync` commands, whole
+`ssh_config` blocks, JSON, and bare addresses.
+
+**Failures are cryptic.** `Permission denied (publickey)` tells you nothing.
+Around forty rules check the address, user, port, key file, jump host,
+forwards, options, duplicates and `known_hosts`, and each finding says what is
+wrong, why it matters, and offers a fix. A key at mode 0644 is one keystroke
+from being fixed rather than an afternoon of confusion.
+
+**The easy path is the insecure one.** Plenty of tooling reaches for
+`StrictHostKeyChecking=no` to stop the prompts. This plugin refuses to, builds
+every command as an argument list instead of a shell string, keeps agent
+forwarding off by default, and never writes key material anywhere.
+
+## Features
+
+- **Host manager** — searchable, sortable, filter-as-you-type, bulk marks,
+  live reachability, and a detail pane showing the exact command that will run.
+- **Smart paste** — one field understands every shape an SSH connection comes
+  in. Passwords and private keys are refused with an explanation.
+- **~40 misconfiguration checks** with automatic repair: key permissions,
+  public-key-used-as-private, PuTTY keys, missing files, encrypted keys not in
+  the agent, deprecated algorithms, invalid forwards, misspelled ssh options,
+  duplicate names, jump-host loops, unresolvable names, closed ports.
+- **`~/.ssh/config` both ways** — existing hosts appear automatically
+  (including `Include`); export writes into a delimited managed block that
+  leaves the rest of your file untouched.
+- **Sessions anywhere** — tab, split, float, or a tmux window. Existing
+  sessions are reused rather than redialled.
+- **Bastions, forwards, remote commands** — `ProxyJump`, `-L`/`-R`/`-D`,
+  landing directories, and per-host `ssh -o` options.
+- **ssh-agent, keygen, ssh-copy-id** from inside the manager.
+- **Production guard** — hosts tagged `prod` confirm before opening.
+- **Connection multiplexing** — opt-in `ControlMaster`; reconnects in
+  milliseconds.
+- **Frecency ranking** — the host you actually want is at the top.
+- **Telescope / fzf-lua / snacks** integrations, or the built-in manager.
+- **Accessible by construction** — see below.
+- **`:checkhealth ssh_launcher`** that checks your whole setup, not just the
+  plugin's.
+
+## Requirements
+
+Neovim **0.10+** and the OpenSSH client. `ssh-add`, `ssh-keygen` and
+`ssh-copy-id` unlock the agent, key-inspection and key-distribution features.
+A Nerd Font is optional — ASCII glyphs are used automatically without one.
+
+## Installation
+
+<details open>
+<summary><b>lazy.nvim</b></summary>
 
 ```lua
 {
   "G00380316/ssh-launcher.nvim",
-  lazy = true,
-  cmd = { "SshLauncher", "SshAddKey", "SshEditKey" },
+  cmd = { "Ssh", "SshLauncher" },
+  keys = {
+    { "<leader>ss", "<cmd>Ssh<cr>", desc = "SSH hosts" },
+  },
+  opts = {},
+}
+```
+</details>
+
+<details>
+<summary><b>packer.nvim</b></summary>
+
+```lua
+use({
+  "G00380316/ssh-launcher.nvim",
   config = function()
     require("ssh_launcher").setup()
   end,
+})
+```
+</details>
+
+`setup()` is optional — the commands work without it.
+
+## Getting started
+
+1. Copy an ssh command from wherever you found it.
+2. `:Ssh`, then press `p`. The clipboard is parsed and the form opens filled in.
+3. `<C-s>` to save, `<CR>` to connect.
+
+Already have `~/.ssh/config`? Those hosts are already in the list, marked
+read-only. Press `i` to import them for editing.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `:Ssh` | Open the manager |
+| `:Ssh {name}` | Connect by name, or to any connection string |
+| `:Ssh add [text]` | New host, optionally seeded from pasted text |
+| `:Ssh edit [name]` | Edit a host |
+| `:Ssh diagnose [name]` | Report every problem found |
+| `:Ssh import [file]` | Import from `~/.ssh/config` or a JSON file |
+| `:Ssh export [file]` | Write hosts into `~/.ssh/config` |
+| `:Ssh agent` | Manage ssh-agent identities |
+| `:Ssh sessions` | Jump to a running session |
+| `:Ssh keygen` | Generate a key pair |
+| `:Ssh health` | `:checkhealth ssh_launcher` |
+
+`:SshLauncher`, `:SshAddKey` and `:SshEditKey` from 1.x still work.
+
+## Keys
+
+In the manager: `<CR>` connect · `a` add · `p` paste-add · `e` edit · `d`
+delete · `<Space>` mark · `/` filter · `s` sort · `D` diagnose · `f` fix · `A`
+agent · `C` copy-id · `G` keygen · `i` import · `X` export · `S` sessions ·
+`?` help.
+
+In the editor: `<Tab>` next field · `<C-k>` pick a key · `<C-f>` fix
+everything · `<C-d>` explain this line · `gx` show the resolved command ·
+`<C-s>` save · `<C-a>` save and connect.
+
+Every key is configurable. `?` shows the current bindings, not the defaults.
+
+## Configuration
+
+Defaults are sensible; everything below is optional. See
+`:help ssh-launcher-config` for the full annotated table.
+
+```lua
+require("ssh_launcher").setup({
+  ssh = {
+    strict_host_key_checking = "accept-new",  -- "no" is refused
+    control_master = true,                    -- multiplex; instant reconnects
+  },
+  terminal = {
+    strategy = "float",                       -- tab | float | vsplit | split | tmux
+  },
+  ui = {
+    picker = "manager",                       -- or telescope | fzf-lua | snacks
+    sort = "frecency",
+  },
+  diagnostics = {
+    on_connect = "block",                     -- off | warn | block
+    disabled = { "SSH090" },                  -- silence individual codes
+  },
+  security = {
+    confirm_production = true,
+    production_tags = { "prod", "production", "live" },
+  },
+})
+```
+
+## Security
+
+- **No shell in the path.** Commands are argument lists handed straight to the
+  process, so nothing in a hostname, key path or remote command can be
+  interpreted as shell syntax.
+- **Host keys are verified.** `accept-new` by default. `no` requires two
+  explicit opt-ins and still flags every affected host.
+- **No secrets stored.** Pasted passwords are discarded, pasted private keys
+  refused, credential-shaped fields reported as errors. The database is written
+  atomically at mode 0600 and loose permissions are tightened on sight.
+- **Agent forwarding is opt-in** and warned about; `ProxyJump` is suggested
+  instead.
+- **`IdentitiesOnly=yes`** whenever a host names a key, so a large agent cannot
+  burn through the server's `MaxAuthTries`.
+- **Concurrent Neovim instances merge** rather than overwrite each other's
+  edits.
+
+## Accessibility
+
+Not a mode — a property of how the UI is built.
+
+- **Never colour alone.** Every status has a glyph *and* a word; rows carry a
+  text marker next to the icon; severities are spelled out.
+- **Everything is text.** No information exists only as a highlight or an
+  overlay. The editor is a normal buffer you edit with normal Vim motions.
+- **Screen readers** get state changes echoed to the message area — what
+  opened, what a paste filled in, how many hosts matched, and the full state of
+  the row under the cursor as you move.
+- **Keyboard only.** Dialogs take cursor + `<CR>`, a number, or a mnemonic.
+- **Your theme wins.** Highlights link to standard groups with `default = true`.
+  `a11y.high_contrast` adds weight and underline instead of relying on hue.
+- **No Nerd Font needed.** ASCII glyphs are automatic.
+
+`:help ssh-launcher-accessibility`
+
+## Data
+
+Hosts live at `stdpath("data")/ssh_launcher/hosts.json`, mode 0600, pretty
+printed with sorted keys so it diffs cleanly in git:
+
+```json
+{
+  "version": 2,
+  "hosts": [
+    {
+      "id": "h_6a6e69b3_f962bdd",
+      "name": "prod-api-eu",
+      "host": "10.0.4.12",
+      "user": "deploy",
+      "port": 2222,
+      "identity_file": "~/.ssh/prod",
+      "proxy_jump": "bastion.corp.net",
+      "tags": ["prod", "eu-west-1"],
+      "forwards": [{ "kind": "local", "spec": "5432:db.internal:5432" }]
+    }
+  ]
 }
 ```
 
-## 🚀 Usage
+Point `store.extra_sources` at a checked-in file to share a fleet definition
+with a team, or drop a `.ssh-launcher.json` in a repository for project-local
+hosts. Both are read-only in the UI.
 
-* `:SshAddKey` – Launches a UI prompt to add a new SSH connection.
-* `:SshEditKey` – Opens a UI selection for saved connections and starts a terminal SSH session.
-* `:SshLauncher` – Opens a UI selection for saved connections and starts a terminal SSH session.
+## Development
 
-## 🛠 Planned Features
-
-* [ ] Add/edit/delete SSH configs from UI
-* [ ] Telescope integration
-* [ ] Encrypted config (GPG)
-
-## 📁 Config Format
-
-```json
-[
-  {
-    "name": "AWS EC2",
-    "user": "ec2-user",
-    "host": "1.2.3.4",
-    "key": "~/.ssh/my-key.pem"
-  }
-]
+```bash
+make test    # nvim --headless -u NONE -l tests/run.lua
+make lint    # stylua --check .
 ```
 
-## 📌 Notes
+The suite needs nothing but Neovim.
 
-* SSH connections are opened in a new Neovim terminal tab.
-* Configuration stored locally at `~/.local/nvim/ssh_launcher/hosts.json`
-* Ensure the private key path is accessible and permissions are correct.
+## License
 
----
+MIT — see [LICENSE](LICENSE).
 
-Feel free to contribute or submit issues at [github.com/G00380316/ssh-launcher.nvim](https://github.com/G00380316/ssh-launcher.nvim)
+Issues and pull requests:
+[github.com/G00380316/ssh-launcher.nvim](https://github.com/G00380316/ssh-launcher.nvim)

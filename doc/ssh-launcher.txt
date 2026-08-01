@@ -1,0 +1,687 @@
+*ssh-launcher.txt*        SSH connection manager for Neovim         *ssh-launcher*
+
+                      ssh-launcher.nvim   ~
+
+        Store hosts. Paste connection strings from anywhere.
+        Catch misconfiguration before it costs you a login.
+
+==============================================================================
+CONTENTS                                                  *ssh-launcher-contents*
+
+  1. Introduction ................................. |ssh-launcher-intro|
+  2. Requirements ................................. |ssh-launcher-requirements|
+  3. Installation ................................. |ssh-launcher-installation|
+  4. Quick start .................................. |ssh-launcher-quickstart|
+  5. Commands ..................................... |ssh-launcher-commands|
+  6. The manager .................................. |ssh-launcher-manager|
+  7. The editor ................................... |ssh-launcher-editor|
+  8. Pasting connections .......................... |ssh-launcher-paste|
+  9. Diagnostics .................................. |ssh-launcher-diagnostics|
+ 10. Diagnostic codes ............................. |ssh-launcher-codes|
+ 11. Security model ............................... |ssh-launcher-security|
+ 12. Accessibility ................................ |ssh-launcher-accessibility|
+ 13. ssh_config integration ....................... |ssh-launcher-ssh-config|
+ 14. Configuration ................................ |ssh-launcher-config|
+ 15. Lua API ...................................... |ssh-launcher-api|
+ 16. Highlights ................................... |ssh-launcher-highlights|
+ 17. Troubleshooting .............................. |ssh-launcher-troubleshooting|
+ 18. Migrating from 1.x ........................... |ssh-launcher-migration|
+
+==============================================================================
+1. INTRODUCTION                                              *ssh-launcher-intro*
+
+ssh-launcher.nvim keeps your SSH fleet inside Neovim: a searchable list of
+hosts, a form that understands anything you paste into it, a rules engine that
+explains why a connection will fail before you try it, and sessions that open
+in a tab, a split, a float or a tmux window.
+
+Design commitments:
+
+- The ssh command line is built as an argument list and handed straight to the
+  process. No shell is involved, so no hostname, key path or remote command can
+  ever be interpreted as a shell command.
+- Host-key verification is never silently disabled. `StrictHostKeyChecking=no`
+  is rejected in configuration and reported as an error on any host that sets
+  it.
+- Key material is never read, stored, copied or logged. The plugin stores paths
+  and metadata; passphrases live in your agent, where they belong.
+- Everything the interface shows is real buffer text. Colour and glyphs are
+  decoration on top of information that is already readable without them.
+
+==============================================================================
+2. REQUIREMENTS                                       *ssh-launcher-requirements*
+
+Required~
+  - Neovim 0.10 or newer
+  - `ssh` (OpenSSH client) on $PATH
+
+Optional~
+  - `ssh-add`      loading passphrase-protected keys into the agent
+  - `ssh-keygen`   fingerprints, key inspection, known_hosts repair
+  - `ssh-copy-id`  installing your public key on a remote host
+  - A Nerd Font    prettier glyphs; ASCII is used automatically without one
+  - telescope.nvim, fzf-lua or snacks.nvim as an alternative picker
+
+Run `:checkhealth ssh_launcher` to see what is present on your machine.
+
+==============================================================================
+3. INSTALLATION                                       *ssh-launcher-installation*
+
+lazy.nvim: >lua
+    {
+      "G00380316/ssh-launcher.nvim",
+      cmd = { "Ssh", "SshLauncher" },
+      keys = {
+        { "<leader>ss", "<cmd>Ssh<cr>", desc = "SSH hosts" },
+      },
+      opts = {},
+    }
+<
+packer.nvim: >lua
+    use({
+      "G00380316/ssh-launcher.nvim",
+      config = function()
+        require("ssh_launcher").setup()
+      end,
+    })
+<
+`setup()` is optional. The commands work without it; calling it only lets you
+change defaults.
+
+==============================================================================
+4. QUICK START                                          *ssh-launcher-quickstart*
+
+  1. Copy an ssh command from your cloud console, a runbook or a colleague's
+     message.
+  2. `:Ssh` to open the manager, then press `p`.
+     The clipboard is parsed and the form opens pre-filled.
+  3. `<C-s>` to save, `<CR>` in the manager to connect.
+
+Already have hosts in `~/.ssh/config`? They appear in the list automatically,
+marked read-only. Press `i` to copy them into the plugin's own store so you can
+edit them.
+
+==============================================================================
+5. COMMANDS                                                *ssh-launcher-commands*
+
+                                                                         *:Ssh*
+:Ssh                    Open the host manager.
+:Ssh {name}             Connect to the saved host {name} (a unique prefix is
+                        enough). If nothing matches, {name} is parsed as a
+                        connection string, so `:Ssh deploy@10.0.0.4` and
+                        `:Ssh ssh -p 2222 root@box` both work.
+
+:Ssh open               Open the manager.
+:Ssh connect [{name}]   Connect; with no argument, pick a host.
+:Ssh add [{text}]       Open the editor for a new host, seeded from {text}.
+:Ssh edit [{name}]      Edit a saved host.
+:Ssh delete {name}      Delete a saved host (asks first).
+:Ssh list               List saved hosts.
+:Ssh diagnose [{name}]  Report every problem found, for one host or all.
+:Ssh import [{file}]    Import from `~/.ssh/config`, or from a JSON file.
+:Ssh export [{file}]    Write saved hosts into the managed block of
+                        `~/.ssh/config`.
+:Ssh agent              Inspect and manage ssh-agent identities.
+:Ssh sessions           Jump to a running session.
+:Ssh keygen             Generate a new key pair.
+:Ssh reload             Re-read the host database and `~/.ssh/config`.
+:Ssh health             Run `:checkhealth ssh_launcher`.
+:Ssh version            Print the plugin version.
+
+Completion works for subcommands, host names and file paths.
+
+Legacy names~
+The 1.x commands still work: `:SshLauncher`, `:SshAddKey`, `:SshEditKey`, plus
+`:SshConnect`, `:SshAgent`, `:SshSessions` and `:SshDiagnose`. Set
+`commands.legacy = false` to omit them.
+
+==============================================================================
+6. THE MANAGER                                              *ssh-launcher-manager*
+
+The manager lists every host with its health, target, key and last use. The
+detail pane underneath shows the exact command that will run and any problems
+found.
+
+Default mappings (all configurable, see |ssh-launcher-config|):
+
+  <CR> o        connect
+  <C-x>         connect in a horizontal split
+  <C-v>         connect in a vertical split
+  <C-t>         connect in a new tab
+  S             jump to a running session
+  y             copy the resolved ssh command
+
+  a             add a host
+  p             add from the clipboard
+  e             edit
+  c             duplicate
+  r             rename
+  d <Del>       delete (the marked hosts, or the one under the cursor)
+  <Space>       mark / unmark
+  M             clear marks
+
+  D             show every problem; 1-9 there applies a single fix
+  f             apply every safe fix
+  P             re-check reachability
+  A             ssh-agent menu
+  C             ssh-copy-id to this host
+  G             generate a key pair
+
+  /             filter as you type
+  <Esc>         clear the filter, or close
+  s             change the sort order
+  R             reload from disk
+  i             import
+  X             export
+  ?             help
+  q             close
+
+Marks make bulk work practical: mark ten hosts with `<Space>`, then `f` to
+repair them all or `X` to export just those.
+
+==============================================================================
+7. THE EDITOR                                                *ssh-launcher-editor*
+
+The editor is an ordinary buffer of `Label: value` lines. Every Vim motion,
+register and undo works, and a screen reader reads it as text rather than as
+widget state.
+
+  <Tab> <S-Tab>   move between fields
+  <CR>            start editing the field under the cursor
+  <C-g>           pull a connection out of the clipboard
+  <C-k>           choose from the private keys found in `~/.ssh`
+  <C-d>           explain the problem on this line
+  ]d [d           next / previous problem (standard |vim.diagnostic| mappings)
+  <C-f>           apply every safe fix
+  gx              show the exact ssh command that will run
+  <C-s> :w        save
+  <C-a>           save and connect
+  q               close (asks about unsaved changes)
+  <C-c>           close, discarding changes
+
+Fields~
+  Name          label shown in the picker and exported to ssh_config
+  Host          hostname or IP; no user, no port
+  User          remote user; empty means "whatever ssh_config says"
+  Port          empty means 22
+  Key           private key path; empty means the agent decides
+  Jump          bastion to hop through (`ProxyJump`)
+  Tags          comma separated; used for filtering and policy
+  Forwards      `L 8080:localhost:80, R 9000:localhost:9000, D 1080`
+  Remote dir    cd here after connecting
+  Command       run this instead of a login shell
+  Options       extra `ssh -o` pairs, `Key=Value` separated by commas
+  Notes         free text
+
+Problems are published through |vim.diagnostic| against the buffer, so they
+appear in whatever diagnostic UI you already use.
+
+==============================================================================
+8. PASTING CONNECTIONS                                        *ssh-launcher-paste*
+
+The first line of the editor is a Paste field. Drop anything connection-shaped
+into it and the fields fill in; the Paste line then clears itself.
+
+Understood formats: >
+    ssh -i ~/.ssh/k.pem -p 2222 ec2-user@10.0.0.4
+    ssh -o ProxyJump=bastion deploy@app-01 'journalctl -fu api'
+    ssh://deploy@app-01.internal:2222/srv/app
+    deploy@app-01:2222
+    root@[2001:db8::1]:2222
+    scp -i key.pem file.tar deploy@app-01:/tmp/
+    rsync -e "ssh -p 2222" ./dist deploy@app-01:/srv
+    Host prod
+      HostName 10.0.0.4
+      User deploy
+    { "host": "10.0.0.4", "user": "deploy" }
+    Host: 10.0.0.4   User: deploy   Port: 2222
+    10.0.0.4
+<
+Shell prompt characters (`$`, `#`, `>`), `sudo`, quoting, backslash line
+continuations and trailing remote commands are all handled.
+
+Two things are deliberately *not* carried over:
+
+- `StrictHostKeyChecking=no` — you are told it was dropped and why.
+- Anything that looks like a password or a private key — the paste is refused
+  with an explanation of where that material should live instead.
+
+`p` in the manager reads the clipboard directly, so the common case is one
+keystroke.
+
+==============================================================================
+9. DIAGNOSTICS                                          *ssh-launcher-diagnostics*
+
+Every host is continuously checked against roughly forty rules covering the
+address, the user, the port, the key file, the jump host, port forwards, ssh
+options, duplicates, known_hosts and security policy.
+
+Each finding carries a severity, an explanation of why it matters and, where
+one exists, a fix.
+
+Fixes come in two kinds:
+
+  automatic   safe and unambiguous: `chmod 600` a key, strip a URL scheme out
+              of the Host field, split `user@host`, switch a host away from
+              `StrictHostKeyChecking=no`, bind a wildcard forward to
+              localhost, correct a misspelled ssh option. `f` in the manager
+              and `<C-f>` in the editor apply all of these.
+
+  confirmed   anything that guesses at your intent or starts an interactive
+              process: choosing which key identifies you, or running `ssh-add`.
+              These are never applied unattended. Press `D` for the list and a
+              number key to run one.
+
+Before a connection opens, blocking problems stop it with a dialog offering to
+fix them, edit the host, or connect anyway. Set
+`diagnostics.on_connect = "warn"` to make that advisory, or `"off"` to skip it.
+
+Network checks (DNS resolution and a TCP probe) run in the background on
+libuv and never block the editor.
+
+==============================================================================
+10. DIAGNOSTIC CODES                                          *ssh-launcher-codes*
+
+Silence a code with `diagnostics.disabled = { "SSH090" }`, or change its
+severity with `diagnostics.severity_overrides = { SSH012 = "off" }`.
+
+Address and identity~
+  SSH001  host is empty
+  SSH002  host contains whitespace
+  SSH003  host still contains a `user@` part
+  SSH004  host contains a URL scheme
+  SSH006  host is not a valid hostname or IP
+  SSH007  host is a short name that needs a search domain or alias
+  SSH010  no user set
+  SSH011  user contains an invalid character
+  SSH012  connecting as root
+  SSH020  port is not a whole number in 1-65535
+  SSH080  name is empty
+  SSH081  another saved host has the same name
+  SSH082  another saved host points at the same target
+  SSH083  the name collides with an ssh_config Host alias
+
+Keys~
+  SSH030  key file does not exist
+  SSH031  key path is a directory
+  SSH032  key is the public half
+  SSH033  key permissions are too open        (ssh will refuse it)
+  SSH034  `~/.ssh` permissions are too open
+  SSH035  key is a PuTTY `.ppk` file
+  SSH036  key is passphrase-protected and not loaded in the agent
+  SSH037  key cannot be read
+  SSH038  file does not look like a private key
+  SSH039  file is an X.509 certificate
+  SSH040  key sits in a git working tree or a world-readable directory
+  SSH041  no key set and the agent holds no identities
+  SSH042  key algorithm is deprecated or too small
+
+Routing~
+  SSH050  the jump host is this host
+  SSH051  the jump host resolves through ssh_config rather than here
+  SSH052  malformed jump specification
+  SSH060  invalid port-forward specification
+  SSH061  forward binds every interface
+
+Options and policy~
+  SSH070  ssh does not know that option
+  SSH071  host-key checking is disabled for this host
+  SSH072  agent forwarding is enabled
+  SSH073  an option value looks like a secret
+  SSH090  no known_hosts entry yet
+  SSH100  a field looks like it contains a credential
+  SSH120  host is tagged as production
+
+Network (asynchronous)~
+  SSH110  the name does not resolve
+  SSH111  nothing is listening, or the host did not answer
+
+==============================================================================
+11. SECURITY MODEL                                         *ssh-launcher-security*
+
+No shell, ever~
+Commands are built as argument lists and executed directly. A host named
+`example.com; rm -rf /` cannot run anything — and is rejected as an invalid
+hostname besides.
+
+Host keys are verified~
+The default policy is `accept-new`: the first key is trusted and recorded, and
+any later change is reported. `no` is refused unless you set both
+`ssh.strict_host_key_checking = "no"` and `diagnostics.allow_insecure = true`,
+and even then every affected host is flagged.
+
+No secrets on disk~
+The host database holds paths and metadata. Pasted passwords are discarded,
+pasted private keys are refused, and fields that look like credentials are
+reported as errors. The database is written atomically with mode 0600, and
+loose permissions on it are tightened on sight.
+
+Agent forwarding is opt-in~
+`-A` lets anyone with root on the far end use your loaded keys. It is off by
+default, warned about when enabled, and `ProxyJump` is suggested instead.
+
+Keys are offered narrowly~
+When a host names a key, `IdentitiesOnly=yes` is added so a large agent cannot
+exhaust the server's `MaxAuthTries` before the right key is tried.
+
+Production is a speed bump~
+Hosts tagged `prod`, `production` or `live` (configurable) ask for confirmation
+before a session opens.
+
+Concurrent editors do not clobber each other~
+Before every write the on-disk timestamp is compared with what was loaded; if
+another Neovim wrote in the meantime, the two sets are merged per host by
+modification time rather than overwritten.
+
+==============================================================================
+12. ACCESSIBILITY                                     *ssh-launcher-accessibility*
+
+Accessibility here is a property of the data model, not a mode you switch on.
+
+Never colour alone~
+Every status has a glyph *and* a word. Rows carry a text marker (`up`, `dn`,
+`err`) alongside the icon; severities are spelled out in full in dialogs and
+diagnostic views.
+
+Everything is text~
+Windows are ordinary buffers. There is no information that exists only as a
+highlight, a virtual-text overlay or a border decoration.
+
+Screen readers~
+`a11y.announce` echoes state changes to the message area, the one surface every
+screen reader observes: what opened, what was filled in from a paste, how many
+hosts matched a filter, and the full state of the row under the cursor as you
+move.
+
+Keyboard only~
+No action anywhere needs a mouse. Dialogs accept cursor movement plus `<CR>`,
+a number, or a mnemonic letter.
+
+Colourschemes and contrast~
+Highlights link to standard groups (`DiagnosticError`, `Title`, `Comment`, …)
+with `default = true`, so your theme wins and your own overrides win over that.
+`a11y.high_contrast` adds weight and underline instead of relying on hue.
+
+Without a Nerd Font~
+`ui.icons` defaults to `"auto"` and follows `vim.g.have_nerd_font`. ASCII
+glyphs are used otherwise; `a11y.ascii = true` forces them.
+
+Relevant options: `a11y.ascii`, `a11y.announce`, `a11y.text_markers`,
+`a11y.high_contrast`, `a11y.reduce_motion`, `a11y.virtual_text`,
+`a11y.diagnostics_panel`.
+
+==============================================================================
+13. SSH_CONFIG INTEGRATION                              *ssh-launcher-ssh-config*
+
+Reading~
+`~/.ssh/config` is parsed on startup, including `Include` directives. Hosts
+appear in the manager marked read-only; wildcard patterns and `Match` blocks
+are skipped because they cannot be represented as a single host. Editing one
+and saving forks an editable copy into the plugin's own store.
+
+Writing~
+`:Ssh export` writes your saved hosts into a delimited block: >
+    # >>> ssh-launcher.nvim managed block >>>
+    Host prod-api
+      HostName 10.0.4.12
+      User deploy
+      IdentityFile ~/.ssh/prod
+      IdentitiesOnly yes
+    # <<< ssh-launcher.nvim managed block <<<
+<
+Only that block is ever rewritten; everything you wrote by hand is preserved,
+and a `.ssh-launcher.bak` copy is made first. After exporting, plain
+`ssh prod-api` works outside Neovim too.
+
+Preview the result before writing with `X` in the manager.
+
+==============================================================================
+14. CONFIGURATION                                             *ssh-launcher-config*
+
+Defaults in full: >lua
+    require("ssh_launcher").setup({
+      store = {
+        path = vim.fn.stdpath("data") .. "/ssh_launcher/hosts.json",
+        state_dir = vim.fn.stdpath("data") .. "/ssh_launcher",
+        backup = true,
+        backup_keep = 5,
+        -- Shared, read-only fleet files:
+        --   { { path = "/etc/fleet.json", name = "team" } }
+        extra_sources = {},
+        project_file = ".ssh-launcher.json",
+      },
+
+      ssh = {
+        binary = "ssh",
+        strict_host_key_checking = "accept-new", -- yes | accept-new | ask | no
+        connect_timeout = 10,
+        server_alive_interval = 30,
+        server_alive_count_max = 3,
+        control_master = false,                  -- connection multiplexing
+        control_path = vim.fn.stdpath("cache") .. "/ssh_launcher/cm-%C",
+        control_persist = "10m",
+        extra_args = {},
+        default_options = {},                    -- applied as -o Key=Value
+        forward_agent = false,
+        request_tty = true,
+        compression = false,
+      },
+
+      terminal = {
+        strategy = "tab",  -- tab | float | vsplit | split | current | tmux
+        reuse = true,
+        start_insert = true,
+        close_on_exit = false,
+        notify_on_exit = true,
+        buf_options = {},
+        win_options = { number = false, relativenumber = false, signcolumn = "no" },
+        float = { width = 0.9, height = 0.85, border = "rounded" },
+      },
+
+      ui = {
+        border = "rounded",
+        width = 0.82,
+        height = 0.8,
+        winblend = 0,
+        icons = "auto",   -- true | false | "auto" (follows vim.g.have_nerd_font)
+        columns = { "status", "name", "target", "key", "tags", "last" },
+        sort = "frecency", -- frecency | name | recent | host | manual
+        confirm_delete = true,
+        show_footer = true,
+        preview = true,
+        picker = "manager", -- manager | telescope | fzf-lua | snacks | select | auto
+      },
+
+      a11y = {
+        ascii = false,
+        announce = true,
+        text_markers = true,
+        high_contrast = false,
+        reduce_motion = true,
+        virtual_text = true,
+        diagnostics_panel = true,
+      },
+
+      diagnostics = {
+        enable = true,
+        on_connect = "block",   -- off | warn | block
+        check_dns = true,
+        check_reachability = true,
+        probe_timeout = 2000,
+        check_permissions = true,
+        check_key_format = true,
+        check_known_hosts = true,
+        allow_insecure = false,
+        disabled = {},                 -- e.g. { "SSH090" }
+        severity_overrides = {},       -- e.g. { SSH012 = "off" }
+      },
+
+      ssh_config = {
+        path = "~/.ssh/config",
+        include = true,
+        follow_includes = true,
+        skip_wildcards = true,
+        import_on_setup = false,
+        block_begin = "# >>> ssh-launcher.nvim managed block >>>",
+        block_end = "# <<< ssh-launcher.nvim managed block <<<",
+      },
+
+      security = {
+        forbid_secret_storage = true,
+        warn_agent_forwarding = true,
+        confirm_production = true,
+        production_tags = { "prod", "production", "live" },
+        offer_permission_fix = true,
+        redact_in_logs = false,
+      },
+
+      history = {
+        enable = true,
+        max_entries = 1000,
+        frecency = { recency_weight = 1.0, frequency_weight = 1.0, half_life_days = 14 },
+      },
+
+      keymaps = { --[[ see |ssh-launcher-manager|; set any to false to unbind ]] },
+
+      commands = { enable = true, legacy = true },
+      log_level = vim.log.levels.INFO,
+    })
+<
+Invalid values are reported as warnings and replaced with the default rather
+than raising an error, so a typo in your config can never stop Neovim from
+starting.
+
+Connection multiplexing                                *ssh-launcher-multiplex*
+`ssh.control_master = true` reuses one authenticated channel for every
+subsequent connection to the same host. Reconnects become near-instant, which
+matters when you open a dozen shells on the same machine.
+
+Project-local hosts                                      *ssh-launcher-project*
+A `.ssh-launcher.json` file in the working directory is loaded as a read-only
+source, so a repository can ship its own staging hosts. Use the same format as
+`:Ssh export` produces.
+
+==============================================================================
+15. LUA API                                                      *ssh-launcher-api*
+
+>lua
+    local ssh = require("ssh_launcher")
+
+    ssh.setup(opts)             -- optional
+    ssh.open(opts)              -- open the manager
+    ssh.pick(opts)              -- pick with the configured picker, then connect
+    ssh.connect(target, opts)   -- name, host table, or any parseable string
+    ssh.add(text)               -- open the editor, seeded from text
+    ssh.edit(name)
+    ssh.delete(name)
+    ssh.diagnose(name)          -- nil for a report on every host
+    ssh.import({ from = path }) -- omit `from` for ~/.ssh/config
+    ssh.export({ path = path, dry_run = false })
+    ssh.agent()
+    ssh.sessions()
+    ssh.hosts()                 -- the host list, for scripting
+    ssh.save(spec)              -- add a host from a table or a string
+    ssh.health()
+<
+Example — connect to whatever is under the cursor: >lua
+    vim.keymap.set("n", "<leader>sc", function()
+      require("ssh_launcher").connect(vim.fn.expand("<cWORD>"))
+    end, { desc = "SSH to the word under the cursor" })
+<
+Example — seed a repository's hosts at startup: >lua
+    for _, spec in ipairs({ "deploy@web-01", "deploy@web-02" }) do
+      require("ssh_launcher").save(spec)
+    end
+<
+Lower-level modules (`ssh_launcher.parser`, `.diagnostics`, `.store`,
+`.host`, `.keys`, `.agent`, `.probe`, `.sshconfig`) are documented in their
+source headers and are safe to use directly.
+
+==============================================================================
+16. HIGHLIGHTS                                             *ssh-launcher-highlights*
+
+All groups are defined with `default = true` and link to standard groups, so
+your colourscheme wins and your own overrides win over that.
+
+  SshLauncherNormal      NormalFloat
+  SshLauncherBorder      FloatBorder
+  SshLauncherTitle       Title
+  SshLauncherHeader      Title
+  SshLauncherName        Function
+  SshLauncherTarget      String
+  SshLauncherKey         Constant
+  SshLauncherTag         Type
+  SshLauncherMuted       Comment
+  SshLauncherFooter      Comment
+  SshLauncherKeyHint     Special
+  SshLauncherMatch       IncSearch
+  SshLauncherSelected    Visual
+  SshLauncherMarked      DiffAdd
+  SshLauncherOk          DiagnosticOk
+  SshLauncherError       DiagnosticError
+  SshLauncherWarn        DiagnosticWarn
+  SshLauncherInfo        DiagnosticInfo
+  SshLauncherHint        DiagnosticHint
+  SshLauncherProduction  DiagnosticWarn
+  SshLauncherReadOnly    Comment
+  SshLauncherLabel       Label
+  SshLauncherValue       Normal
+  SshLauncherSection     Title
+  SshLauncherCursor      CursorLine
+  SshLauncherPrompt      Question
+  SshLauncherCount       Number
+
+==============================================================================
+17. TROUBLESHOOTING                                 *ssh-launcher-troubleshooting*
+
+Start with `:checkhealth ssh_launcher`. It checks the OpenSSH tooling,
+permissions on `~/.ssh` and on every discovered key, the agent, your
+`ssh_config`, and every saved host.
+
+"It asks for my passphrase every time"~
+The key is not in the agent. Press `A` in the manager, or `<C-f>` on the host.
+On macOS the key is added with `--apple-use-keychain` so it is asked for once.
+
+"WARNING: UNPROTECTED PRIVATE KEY FILE"~
+Code SSH033. Press `f`; the key is chmod'ed to 0600 and `~/.ssh` to 0700.
+
+"Too many authentication failures"~
+The agent offered every key it holds before reaching the right one. Set the Key
+field on the host — `IdentitiesOnly=yes` is then added automatically.
+
+"Permission denied (publickey)"~
+Press `D` on the host. Common causes: the public key is not in the remote
+`authorized_keys` (press `C` to install it), the wrong user, or a key the
+server does not accept (SSH042).
+
+The connection just hangs~
+Check the detail pane for the network line. A timeout usually means a firewall
+or a missing VPN; `refused` means sshd is not listening on that port.
+
+Seeing a session that will not close~
+`S` lists live sessions. In a dead one, `q` closes the window.
+
+Debug logging~
+Set `log_level = vim.log.levels.DEBUG`; a log is written to
+`stdpath("log")/ssh-launcher.log`, including the exact argv of every
+connection.
+
+==============================================================================
+18. MIGRATING FROM 1.x                                    *ssh-launcher-migration*
+
+Nothing is required. The old `hosts.json` (a bare array of
+`{name, user, host, key}`) is detected on first load, backed up under
+`ssh_launcher/backups/`, and rewritten in the current schema. The `key` field
+becomes `identity_file` and keeps working if you hand-edit it back.
+
+`:SshLauncher`, `:SshAddKey` and `:SshEditKey` all still exist.
+
+Two behaviours deliberately changed:
+
+- 1.x passed `-o StrictHostKeyChecking=no` on every connection, which accepts
+  any host key without verification. The default is now `accept-new`.
+- 1.x built the command by string concatenation. Commands are now argument
+  lists, so a hostname can no longer inject shell syntax.
+
+==============================================================================
+vim:tw=78:ts=8:et:ft=help:norl:
