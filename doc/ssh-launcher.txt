@@ -211,7 +211,13 @@ Fields~
   Remote dir    cd here after connecting
   Command       run this instead of a login shell
   Options       extra `ssh -o` pairs, `Key=Value` separated by commas
-  Notes         free text
+  Notes         free text. Never store secrets here.
+
+Every field is single-line, including Command and Notes. `ssh_config` cannot
+express a newline in any directive, so a multi-line value could never be
+exported or edited; one arriving from an import or a hand-edited database has
+its line breaks replaced with spaces, and the editor says so when it opens.
+Use `;` or `&&` to chain remote commands.
 
 Problems are published through |vim.diagnostic| against the buffer, so they
 appear in whatever diagnostic UI you already use.

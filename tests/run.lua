@@ -268,6 +268,47 @@ test("untangles user and port out of the host field", function()
   eq(h.remote_dir, "/srv")
 end)
 
+test("forces single-line fields onto one line", function()
+  local h, rewrites = Host.normalize({
+    name = "prod\napi",
+    host = "10.0.0.1\nevil",
+    user = "de\nploy",
+    identity_file = "~/.ssh/a\nb",
+    proxy_jump = "bas\ntion",
+    remote_dir = "/srv\n/app",
+    remote_command = "cd /srv\nmake deploy",
+    notes = "line one\nline two",
+    forwards = { { kind = "local", spec = "8080:local\nhost:80" } },
+    options = { SetEnv = "A=\nb" },
+  })
+  local fields = {
+    "name",
+    "host",
+    "user",
+    "identity_file",
+    "proxy_jump",
+    "remote_dir",
+    "remote_command",
+    "notes",
+  }
+  for _, field in ipairs(fields) do
+    falsy(tostring(h[field]):find("\n"), field .. " still contains a newline")
+  end
+  -- The rewrite is reported so the UI can tell the user their data changed.
+  truthy(#rewrites > 0, "normalize reported nothing")
+  falsy(h.forwards[1].spec:find("\n"), "forward spec")
+  falsy(h.options.SetEnv:find("\n"), "option value")
+  -- Substituted, not deleted: the whitespace rules must still see it as broken.
+  eq(h.host, "10.0.0.1 evil")
+  local reported = false
+  for _, issue in ipairs(require("ssh_launcher.diagnostics").check(h, { hosts = {} })) do
+    if issue.code == "SSH002" or issue.code == "SSH006" then
+      reported = true
+    end
+  end
+  truthy(reported, "the mangled host is still reported as malformed")
+end)
+
 test("builds argv as a list, never a shell string", function()
   local argv = Host.build_argv(Host.normalize({ host = "a.example.com", user = "u", remote_command = "echo hi; ls" }))
   eq(argv[1], "ssh")
@@ -567,6 +608,31 @@ test("manager renders rows, filters and previews", function()
   mgr.win:close()
 end)
 
+test("a host containing newlines renders instead of taking the window down", function()
+  reset_store()
+  -- Reach past normalize the way a hand-edited database or a bad import would,
+  -- so the render layer is the thing under test.
+  local store_module = require("ssh_launcher.store")
+  store_module.add({ name = "ok-host", host = "10.0.0.9" })
+  local raw = store_module.list()
+  raw[1].name = "prod\napi"
+  raw[1].host = "10.0.0.1\nevil"
+
+  local manager = require("ssh_launcher.ui.manager")
+  manager.open()
+  local mgr = manager.instance()
+  truthy(mgr, "manager did not open")
+
+  local lines = vim.api.nvim_buf_get_lines(mgr.win.buf, 0, -1, false)
+  contains(lines, "prod api", "the newline became a space")
+  for _, line in ipairs(lines) do
+    falsy(line:find("\n"), "buffer lines must never contain newlines")
+  end
+
+  mgr:draw_preview()
+  mgr.win:close()
+end)
+
 test("the editor form distributes a pasted ssh command across fields", function()
   reset_store()
   local h = store.add({ name = "prod-api", host = "10.0.0.4", user = "deploy" })
@@ -596,6 +662,38 @@ test("the editor form distributes a pasted ssh command across fields", function(
   local after = vim.api.nvim_buf_get_lines(form.win.buf, 0, -1, false)
   contains(after, "Host        : 9.9.9.9", "form re-rendered")
   contains(after, "Paste       : ", "paste line cleared")
+
+  form.win:close()
+end)
+
+test("the editor never grows orphan lines from a multi-line value", function()
+  reset_store()
+  local h = store.add({
+    name = "a",
+    host = "10.0.0.1",
+    notes = "line one\nline two",
+    remote_command = "cd /srv\nmake deploy",
+  })
+
+  local form = require("ssh_launcher.ui.form").edit(h)
+  local lines = vim.api.nvim_buf_get_lines(form.win.buf, 0, -1, false)
+
+  -- Every non-comment, non-blank line must parse back as a field. Anything
+  -- else is content the form cannot round-trip, and would be lost on save.
+  for _, line in ipairs(lines) do
+    if line ~= "" and line:sub(1, 1) ~= "#" then
+      truthy(line:match("^%s*[%a][%a%s]-%s*:"), ("orphan line in the form: %q"):format(line))
+    end
+  end
+
+  -- and the value survives a save unchanged
+  form:save()
+  vim.wait(50, function()
+    return false
+  end)
+  local saved = store.get_by_name("a")
+  eq(saved.notes, "line one line two")
+  eq(saved.remote_command, "cd /srv make deploy")
 
   form.win:close()
 end)

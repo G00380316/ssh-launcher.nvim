@@ -221,6 +221,13 @@ end
 -- Construction / normalization
 --------------------------------------------------------------------------------
 
+--- Trimmed, single-line, or nil. The shape every scalar host field must hold.
+---@param value any
+---@return string|nil
+local function one_line(value)
+  return util.nonblank(util.single_line(value))
+end
+
 ---@return ssh_launcher.Host
 function M.blank()
   return {
@@ -273,7 +280,7 @@ function M.to_forwards(value)
     local out = {}
     for _, f in ipairs(value) do
       if type(f) == "table" and f.spec then
-        out[#out + 1] = { kind = f.kind or "local", spec = util.trim(f.spec) }
+        out[#out + 1] = { kind = f.kind or "local", spec = util.trim(util.single_line(f.spec)) }
       elseif type(f) == "string" then
         vim.list_extend(out, M.to_forwards(f))
       end
@@ -290,7 +297,7 @@ function M.to_forwards(value)
       local kind, spec = chunk:match("^%-?([LRDlrd])%s*(.+)$")
       if kind then
         local map = { l = "local", r = "remote", d = "dynamic" }
-        out[#out + 1] = { kind = map[kind:lower()], spec = util.trim(spec) }
+        out[#out + 1] = { kind = map[kind:lower()], spec = util.trim(util.single_line(spec)) }
       else
         out[#out + 1] = { kind = "local", spec = chunk }
       end
@@ -319,7 +326,8 @@ function M.to_options(value)
   if type(value) == "table" then
     local out = {}
     for k, v in pairs(value) do
-      out[tostring(k)] = tostring(v)
+      -- ssh parses `-o` one line at a time; a newline in a value is never valid.
+      out[util.single_line(k)] = util.single_line(v)
     end
     return out
   end
@@ -331,7 +339,7 @@ function M.to_options(value)
   for chunk in value:gmatch("[^,]+") do
     local k, v = chunk:match("^%s*([%w_]+)%s*=%s*(.-)%s*$")
     if k then
-      out[k] = v
+      out[k] = util.trim(util.single_line(v))
     end
   end
   return out
@@ -422,12 +430,35 @@ end
 ---@return ssh_launcher.Host host, string[] notes
 function M.normalize(partial)
   local h = vim.deepcopy(partial or {})
+  local notes = {}
+
+  --- Collapse a field and say so, so the change is never silent.
+  ---@param value any
+  ---@param label string
+  ---@return string|nil
+  local function collapse(value, label)
+    local cleaned = one_line(value)
+    if value ~= nil and tostring(value):find("[%z\1-\31]") then
+      notes[#notes + 1] = ("replaced a line break in %s with a space"):format(label)
+    end
+    return cleaned
+  end
 
   h.id = h.id or util.uid()
   h.source = h.source or "store"
-  h.name = util.trim(h.name or "")
-  h.host = util.trim(h.host or "")
-  h.user = util.nonblank(h.user)
+
+  -- Every scalar field is single-line, without exception.
+  --
+  -- That is not just a rendering convenience: `ssh_config` cannot express a
+  -- newline in any directive, so a multi-line value could never be exported,
+  -- and the editor is line-based, so it could never be edited either. Allowing
+  -- one anywhere means it silently loses its tail the first time it is opened.
+  -- Control characters become spaces rather than being dropped, so the
+  -- whitespace rules still report the value as malformed instead of it
+  -- quietly looking fine.
+  h.name = util.trim(util.single_line(h.name or ""))
+  h.host = util.trim(util.single_line(h.host or ""))
+  h.user = collapse(h.user, "the user")
 
   if type(h.port) == "string" then
     h.port = tonumber(util.trim(h.port))
@@ -441,12 +472,14 @@ function M.normalize(partial)
     h.identity_file = h.key
   end
   h.key = nil
-  h.identity_file = util.nonblank(h.identity_file)
+  h.identity_file = collapse(h.identity_file, "the key path")
 
-  h.proxy_jump = util.nonblank(h.proxy_jump)
-  h.remote_command = util.nonblank(h.remote_command)
-  h.remote_dir = util.nonblank(h.remote_dir)
-  h.notes = util.nonblank(h.notes)
+  h.proxy_jump = collapse(h.proxy_jump, "the jump host")
+  h.remote_dir = collapse(h.remote_dir, "the remote directory")
+  -- Shell command separators (`;`, `&&`) express what a newline would have,
+  -- and unlike a newline they survive a round trip through ssh_config.
+  h.remote_command = collapse(h.remote_command, "the remote command")
+  h.notes = collapse(h.notes, "the notes")
 
   h.tags = M.to_tags(h.tags)
   h.forwards = M.to_forwards(h.forwards)
@@ -457,7 +490,7 @@ function M.normalize(partial)
   h.last_used_at = tonumber(h.last_used_at)
   h.use_count = tonumber(h.use_count) or 0
 
-  local notes = untangle_host(h)
+  vim.list_extend(notes, untangle_host(h))
 
   if h.name == "" and h.host ~= "" then
     h.name = h.user and ("%s@%s"):format(h.user, h.host) or h.host

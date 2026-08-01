@@ -221,14 +221,27 @@ function Float:reconfigure(opts)
   self:resize()
 end
 
+--- Replace the buffer contents.
+---
+--- A caller that hands over an embedded newline gets it split into real lines
+--- instead of an error out of `nvim_buf_set_lines`; other control characters
+--- become spaces.
 ---@param lines string[]
 function Float:set_lines(lines)
   if not vim.api.nvim_buf_is_valid(self.buf) then
     return
   end
+
+  local flat = {}
+  for _, line in ipairs(lines) do
+    for _, part in ipairs(vim.split(tostring(line), "\n", { plain = true })) do
+      flat[#flat + 1] = util.single_line(part)
+    end
+  end
+
   local was_modifiable = vim.bo[self.buf].modifiable
   vim.bo[self.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, lines)
+  vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, flat)
   vim.bo[self.buf].modifiable = was_modifiable
 end
 
@@ -319,14 +332,25 @@ end
 ---@return ssh_launcher.Float
 function M.text(lines, opts)
   opts = opts or {}
+
+  -- Split first, then measure: a multi-line entry would otherwise be sized as
+  -- one enormous line and the window would come out the full width of the
+  -- screen and one row too short.
+  local flat = {}
+  for _, line in ipairs(lines) do
+    for _, part in ipairs(vim.split(tostring(line), "\n", { plain = true })) do
+      flat[#flat + 1] = part
+    end
+  end
+
   local width = 0
-  for _, l in ipairs(lines) do
+  for _, l in ipairs(flat) do
     width = math.max(width, util.width(l))
   end
   local columns, rows = editor_size()
   opts.width = opts.width or math.min(width + 4, math.floor(columns * 0.9))
-  opts.height = opts.height or math.min(#lines, math.floor(rows * 0.8))
-  opts.lines = lines
+  opts.height = opts.height or math.min(#flat, math.floor(rows * 0.8))
+  opts.lines = flat
   opts.cursorline = opts.cursorline ~= false
   return M.open(opts)
 end

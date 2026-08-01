@@ -6,18 +6,26 @@
 --- add emphasis, never meaning, which is what makes the UI readable with
 --- highlighting off or through a screen reader.
 
+local util = require("ssh_launcher.util")
+
 local M = {}
 
 ---@alias ssh_launcher.Chunk { [1]: string, [2]: string|nil }
 ---@alias ssh_launcher.Line ssh_launcher.Chunk[]
 
+--- Flatten chunks into one buffer line.
+---
+--- Chunk text is forced onto a single line here, at the boundary, rather than
+--- trusting every caller and every data source to have done it: a chunked line
+--- maps 1:1 onto a buffer line that views index by number, so a newline can
+--- never be allowed to turn one row into two.
 ---@param chunks ssh_launcher.Line
 ---@return string text, { hl: string, from: integer, to: integer }[] spans byte ranges
 function M.flatten(chunks)
   local parts, spans = {}, {}
   local offset = 0
   for _, chunk in ipairs(chunks) do
-    local text = chunk[1] or ""
+    local text = util.single_line(chunk[1])
     local hl = chunk[2]
     parts[#parts + 1] = text
     if hl and #text > 0 then

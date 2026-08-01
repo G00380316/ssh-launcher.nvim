@@ -554,7 +554,12 @@ function M.open(host, opts)
   opts = opts or {}
   local self = setmetatable({}, Form)
 
-  self.host = host and Host.normalize(host) or Host.blank()
+  local rewrites = {}
+  if host then
+    self.host, rewrites = Host.normalize(host)
+  else
+    self.host = Host.blank()
+  end
   self.original = vim.deepcopy(self.host)
   self.is_new = opts.is_new == true
   self.on_save = opts.on_save
@@ -715,6 +720,13 @@ function M.open(host, opts)
     start_line = self.line_of and self.line_of.__paste or start_line
   end
   self.win:set_cursor(start_line + 1)
+
+  -- Loading a record may have had to rewrite it (a stray newline, a `user@` in
+  -- the host field). Say so once, on open: a value that changed underneath the
+  -- user is exactly the kind of thing that must not happen quietly.
+  if #rewrites > 0 then
+    log.warn(("opened with changes: %s"):format(table.concat(rewrites, "; ")))
+  end
 
   log.announce(title .. ". Tab moves between fields, Control-S saves.")
   return self

@@ -306,6 +306,22 @@ function M.blank(s)
   return s == nil or M.trim(s) == ""
 end
 
+--- Collapse a value onto one line.
+---
+--- `nvim_buf_set_lines` raises "'replacement string' item contains newlines" if
+--- any element holds a `\n`, which would take down a whole window because one
+--- host record has a stray newline in it. Control characters become spaces
+--- rather than being deleted: the display width is preserved, so table columns
+--- stay aligned, and the value is still recognisable to whoever has to fix it.
+---@param s any
+---@return string
+function M.single_line(s)
+  if s == nil then
+    return ""
+  end
+  return (tostring(s):gsub("[%z\1-\31\127]", " "))
+end
+
 --- Trimmed string, or `nil` when there was nothing but whitespace.
 --- (Written as a function because `blank(s) and nil or trim(s)` is the classic
 --- Lua footgun: the `nil` branch collapses and the `or` arm always wins.)
