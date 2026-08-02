@@ -733,32 +733,85 @@ test("exit statuses are reported in words, not raw numbers", function()
   contains(terminal.describe_exit(2), "status 2", "an ordinary status is left alone")
 end)
 
-test("closing a session is not reported as a failure", function()
-  local script = TMP .. "/sleeper"
-  vim.fn.writefile({ "#!/bin/sh", "sleep 30" }, script)
+--- Run something in a terminal, tear it down, and report whether the plugin
+--- warned about the resulting exit.
+---@param script_body string[]
+---@param teardown fun(handle: table)|nil
+---@return string|nil warning
+local function warning_from_session(script_body, teardown)
+  local script = TMP .. "/session_script"
+  vim.fn.writefile(script_body, script)
   vim.uv.fs_chmod(script, tonumber("755", 8))
 
-  local warned = false
+  local warned = nil
   local original = vim.notify
   vim.notify = function(msg, level, o)
     if level == vim.log.levels.WARN then
-      warned = true
+      warned = msg
     end
     return original(msg, level, o)
   end
 
   local handle = terminal.run({ script }, { title = "T", strategy = "current", start_insert = false })
-  vim.wait(300, function()
+  vim.wait(250, function()
     return false
   end)
-  -- Deleting the buffer SIGHUPs the job: status 129, but the user asked for it.
-  terminal.close(handle)
-  vim.wait(500, function()
+  if teardown then
+    teardown(handle)
+  end
+  vim.wait(700, function()
     return false
   end)
   vim.notify = original
+  return warned
+end
 
-  falsy(warned, "closing a window must not raise a warning")
+test("no teardown path reports a hangup as a failure", function()
+  local sleeper = { "#!/bin/sh", "sleep 30" }
+  -- Every one of these destroys the pty and SIGHUPs the job (status 129). The
+  -- user asked for it in each case, so none of them is news.
+  falsy(
+    warning_from_session(sleeper, function(h)
+      terminal.close(h)
+    end),
+    "terminal.close()"
+  )
+
+  falsy(
+    warning_from_session(sleeper, function(h)
+      vim.cmd("bdelete! " .. h.buf)
+    end),
+    ":bdelete!"
+  )
+
+  falsy(
+    warning_from_session(sleeper, function(h)
+      vim.cmd("bwipeout! " .. h.buf)
+    end),
+    ":bwipeout!"
+  )
+
+  falsy(
+    warning_from_session(sleeper, function(h)
+      -- What 'nohidden' does when the window closes. Neovim refuses to unload
+      -- the last buffer, so give it another one to fall back to.
+      vim.cmd("enew")
+      vim.api.nvim_buf_delete(h.buf, { force = true, unload = true })
+    end),
+    "unloading the buffer"
+  )
+end)
+
+test("a session that genuinely fails is still reported", function()
+  local warned = warning_from_session({ "#!/bin/sh", "exit 1" })
+  truthy(warned, "an ordinary non-zero exit must be reported")
+  contains(warned, "status 1", "the status")
+
+  local ssh_failure = warning_from_session({ "#!/bin/sh", "exit 255" })
+  truthy(ssh_failure, "ssh's catch-all must be reported")
+  contains(ssh_failure, "could not establish", "explained, not just numbered")
+
+  falsy(warning_from_session({ "#!/bin/sh", "exit 0" }), "a clean exit is silent")
 end)
 
 test("only a locked key that the agent lacks asks to be unlocked", function()

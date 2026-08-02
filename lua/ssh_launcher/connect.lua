@@ -369,7 +369,9 @@ local function launch(h, opts)
     title = Host.label(h),
     strategy = opts.strategy,
     height = opts.height,
-    on_exit = function(code)
+    -- The handle comes in as an argument: the `local handle = terminal.run(…)`
+    -- being assigned here is not yet in scope inside this closure.
+    on_exit = function(code, handle)
       local session = sessions[id]
       if session then
         session.ended_at = util.now()
@@ -379,7 +381,9 @@ local function launch(h, opts)
         host_id = h.id,
         name = Host.label(h),
         target = Host.target(h),
-        outcome = code == 0 and "closed" or "failed",
+        -- Closing the window is a normal way to end a session, so it is not
+        -- logged as a failure just because the resulting status is non-zero.
+        outcome = (code == 0 or terminal.was_torn_down(handle, code)) and "closed" or "failed",
         exit_code = code,
         duration = util.now() - started,
       })

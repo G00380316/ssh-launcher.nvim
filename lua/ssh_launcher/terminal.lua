@@ -33,6 +33,20 @@ local SIGNALS = {
   [15] = { name = "SIGTERM", why = "terminated" },
 }
 
+--- Did this session end because its window went away, rather than because
+--- anything went wrong?
+---
+--- SIGHUP reaches a local `ssh` when its pty is destroyed, and the only thing
+--- that destroys the pty is the terminal buffer being closed. A remote-side
+--- problem never arrives this way — ssh reports those by exiting 255. So a
+--- hangup is local teardown by definition, and is never news.
+---@param handle ssh_launcher.TerminalHandle
+---@param code integer
+---@return boolean
+function M.was_torn_down(handle, code)
+  return handle.closing == true or code == 129
+end
+
 --- Plain-English rendering of a process exit status.
 ---@param code integer
 ---@return string
@@ -205,6 +219,21 @@ function M.run(argv, opts)
     close_on_exit = cfg.terminal.close_on_exit
   end
 
+  -- Destroying the buffer destroys the pty, which SIGHUPs the process. Watch
+  -- for that so every teardown path — `:bdelete`, an unloaded buffer under
+  -- 'nohidden', another plugin's cleanup, quitting Neovim — is recognised as a
+  -- deliberate close rather than reported as a dropped connection. The
+  -- autocommand runs before the scheduled `on_exit`, so the flag is always set
+  -- in time.
+  vim.api.nvim_create_autocmd({ "BufUnload", "BufWipeout" }, {
+    buffer = buf,
+    once = true,
+    desc = "ssh-launcher: note that a session's window went away",
+    callback = function()
+      handle.closing = true
+    end,
+  })
+
   handle.job = spawn(buf, argv, {
     env = opts.env,
     cwd = opts.cwd,
@@ -223,10 +252,8 @@ function M.run(argv, opts)
         end
         if close_on_exit and code == 0 then
           M.close(handle)
-        elseif cfg.terminal.notify_on_exit and code ~= 0 and not handle.closing then
-          -- Only report an exit the user did not ask for. Closing the window
-          -- kills the job with SIGHUP, and announcing that as a failure — with
-          -- advice to press `q` in a window that no longer exists — is noise.
+        elseif cfg.terminal.notify_on_exit and code ~= 0 and not M.was_torn_down(handle, code) then
+          -- Only report an exit the user did not ask for.
           local hint = vim.api.nvim_buf_is_valid(buf) and " — press q to close the window" or ""
           log.warn(("%s %s%s"):format(handle.title, M.describe_exit(code), hint))
         end

@@ -675,11 +675,12 @@ agent, connecting offers to `ssh-add` it first — see |ssh-launcher-unlock|. If
 you dismissed that prompt, press `A` in the manager to load the key by hand.
 On macOS it is added with `--apple-use-keychain`, so it is asked for once ever.
 
-"exited with status 129"~
-129 is `128 + SIGHUP`: the process was hung up rather than exiting on its own.
-Closing the window does that deliberately and is no longer reported. Seeing it
-unprompted means the far end dropped the connection — a server-side timeout, a
-sleeping laptop, or a VPN that went down.
+"the connection was hung up" / "exited with status 129"~
+129 is `128 + SIGHUP`. A local `ssh` receives that when its pty is destroyed,
+which only happens when the terminal buffer goes away — closing the window,
+`:bdelete`, `'nohidden'` unloading it, or quitting Neovim. It is therefore
+always a local teardown, never a remote problem, and is no longer reported at
+all. Remote failures arrive as status 255 with an explanation instead.
 
 "WARNING: UNPROTECTED PRIVATE KEY FILE"~
 Code SSH033. Press `f`; the key is chmod'ed to 0600 and `~/.ssh` to 0700.
