@@ -22,6 +22,37 @@ local M = {}
 ---@field started_at integer
 ---@field exit_code integer|nil
 
+--- Signals reported by a job as `128 + signum`. Without this a user who closed
+--- a window sees "exited with status 129", which reads like a failure.
+local SIGNALS = {
+  [1] = { name = "SIGHUP", why = "the connection was hung up" },
+  [2] = { name = "SIGINT", why = "interrupted" },
+  [3] = { name = "SIGQUIT", why = "quit" },
+  [9] = { name = "SIGKILL", why = "killed" },
+  [13] = { name = "SIGPIPE", why = "the connection broke" },
+  [15] = { name = "SIGTERM", why = "terminated" },
+}
+
+--- Plain-English rendering of a process exit status.
+---@param code integer
+---@return string
+function M.describe_exit(code)
+  if code == 0 then
+    return "finished"
+  end
+  if code > 128 and code < 160 then
+    local sig = SIGNALS[code - 128]
+    if sig then
+      return ("%s (%s)"):format(sig.why, sig.name)
+    end
+    return ("killed by signal %d"):format(code - 128)
+  end
+  if code == 255 then
+    return "ssh could not establish the connection"
+  end
+  return ("exited with status %d"):format(code)
+end
+
 ---@param argv string[]
 ---@param opts table
 ---@return integer job
@@ -192,8 +223,12 @@ function M.run(argv, opts)
         end
         if close_on_exit and code == 0 then
           M.close(handle)
-        elseif cfg.terminal.notify_on_exit and code ~= 0 then
-          log.warn(("%s exited with status %d — press q to close the window"):format(handle.title, code))
+        elseif cfg.terminal.notify_on_exit and code ~= 0 and not handle.closing then
+          -- Only report an exit the user did not ask for. Closing the window
+          -- kills the job with SIGHUP, and announcing that as a failure — with
+          -- advice to press `q` in a window that no longer exists — is noise.
+          local hint = vim.api.nvim_buf_is_valid(buf) and " — press q to close the window" or ""
+          log.warn(("%s %s%s"):format(handle.title, M.describe_exit(code), hint))
         end
       end)
     end,
@@ -244,6 +279,9 @@ function M.close(handle)
   if not handle then
     return
   end
+  -- Deleting the buffer sends SIGHUP to the job; flag it so the resulting
+  -- non-zero status is not reported back as a failure.
+  handle.closing = true
   if handle.float then
     handle.float:close()
   end

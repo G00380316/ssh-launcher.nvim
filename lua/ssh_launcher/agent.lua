@@ -139,6 +139,98 @@ function M.has_key(key_path)
   return false, nil
 end
 
+---@class ssh_launcher.UnlockState
+---@field needed boolean whether ssh-add would help before connecting
+---@field reason string|nil "no-agent" | "not-loaded"
+---@field detail string human-readable explanation
+---@field key string|nil the key that needs loading
+
+--- Would this host's key benefit from `ssh-add` before dialling?
+---
+--- Only true when the key is actually passphrase-protected *and* absent from
+--- the agent. An unencrypted key works straight off disk, so prompting about it
+--- would be pure noise.
+---@param identity_file string|nil
+---@return ssh_launcher.UnlockState
+function M.unlock_state(identity_file)
+  local none = { needed = false, detail = "nothing to unlock" }
+  if util.blank(identity_file) then
+    return none
+  end
+
+  local keys = require("ssh_launcher.keys")
+  local info = keys.info(identity_file, { deep = true })
+  if not info.exists or info.encrypted ~= true then
+    return none
+  end
+
+  local running = M.running()
+  if not running then
+    return {
+      needed = true,
+      reason = "no-agent",
+      key = identity_file,
+      detail = ("%s needs a passphrase and no ssh-agent is running"):format(util.contract(identity_file)),
+    }
+  end
+
+  local loaded = M.has_key(identity_file)
+  if loaded == false then
+    return {
+      needed = true,
+      reason = "not-loaded",
+      key = identity_file,
+      detail = ("%s needs a passphrase and is not loaded in the agent"):format(util.contract(identity_file)),
+    }
+  end
+
+  return none
+end
+
+--- Start an ssh-agent and adopt it for this Neovim session.
+---
+--- The variables are exported into `vim.env` only, so the agent serves this
+--- editor and anything it spawns. It is killed again on exit — leaving a
+--- stray agent holding unlocked keys after Neovim closes would be worse than
+--- not offering this at all.
+---@param cb fun(ok: boolean, msg: string)
+function M.start(cb)
+  if not util.has_executable("ssh-agent") then
+    return cb(false, "ssh-agent is not installed")
+  end
+  util.system({ "ssh-agent", "-s" }, { timeout = 5000 }, function(res)
+    if not res.ok then
+      return cb(false, util.nonblank(res.stderr) or "ssh-agent failed to start")
+    end
+
+    local sock = res.stdout:match("SSH_AUTH_SOCK=([^;]+)")
+    local pid = res.stdout:match("SSH_AGENT_PID=([^;]+)")
+    if not sock then
+      return cb(false, "could not read SSH_AUTH_SOCK from ssh-agent")
+    end
+
+    vim.env.SSH_AUTH_SOCK = sock
+    if pid then
+      vim.env.SSH_AGENT_PID = pid
+      vim.api.nvim_create_autocmd("VimLeavePre", {
+        group = vim.api.nvim_create_augroup("SshLauncherAgent", { clear = true }),
+        desc = "ssh-launcher: stop the agent it started",
+        callback = function()
+          -- Wait for it: an async call started at VimLeavePre can lose the race
+          -- with the editor exiting, and the agent would outlive the session
+          -- holding unlocked keys.
+          pcall(function()
+            vim.system({ "ssh-agent", "-k" }, { env = { SSH_AGENT_PID = pid } }):wait(2000)
+          end)
+        end,
+      })
+    end
+
+    M.invalidate()
+    cb(true, ("started an ssh-agent for this Neovim session (pid %s)"):format(pid or "?"))
+  end)
+end
+
 --- Add a key to the agent. Runs in a terminal because ssh-add may prompt for a
 --- passphrase, and swallowing that prompt is how plugins earn a bad reputation.
 ---@param key_path string
@@ -172,13 +264,18 @@ function M.add(key_path, opts, cb)
 
   require("ssh_launcher.terminal").run(argv, {
     title = ("ssh-add %s"):format(util.contract(path)),
-    height = 8,
+    -- A passphrase prompt is a small, transient thing: a float that clears
+    -- itself once the key is in, and stays put if it was rejected.
+    strategy = opts.strategy or "float",
+    width = 0.6,
+    height = 10,
+    close_on_exit = true,
     on_exit = function(code)
       require("ssh_launcher.keys").invalidate(path)
       M.invalidate()
       local ok = code == 0
       local msg = ok and ("added %s to the agent"):format(util.contract(path))
-        or ("ssh-add exited with %d"):format(code)
+        or ("ssh-add %s"):format(require("ssh_launcher.terminal").describe_exit(code))
       if ok then
         log.info(msg)
       else

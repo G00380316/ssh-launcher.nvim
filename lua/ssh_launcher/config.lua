@@ -55,6 +55,11 @@ M.defaults = {
     extra_args = {},
     --- `-o Key=Value` pairs applied to every connection.
     default_options = {},
+    --- What to do when a host's key needs a passphrase and is not loaded in the
+    --- agent: "prompt" offers to run ssh-add before connecting (and again if the
+    --- connection fails for want of it), "always" just does it, "never" leaves
+    --- it to ssh. Starting an agent, when none is running, is part of this.
+    auto_add_keys = "prompt",
     --- Forward the agent by default. Off: agent forwarding lets anyone with
     --- root on the remote impersonate you.
     forward_agent = false,
@@ -256,6 +261,7 @@ M.did_setup = false
 --- Validation rules: `path -> { allowed values | validator }`.
 local enums = {
   ["ssh.strict_host_key_checking"] = { "yes", "accept-new", "no", "ask" },
+  ["ssh.auto_add_keys"] = { "prompt", "always", "never" },
   ["terminal.strategy"] = { "tab", "float", "vsplit", "split", "current", "tmux" },
   ["ui.sort"] = { "frecency", "name", "recent", "host", "manual" },
   ["ui.picker"] = { "manager", "telescope", "fzf-lua", "snacks", "select", "auto" },

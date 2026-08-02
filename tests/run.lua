@@ -718,6 +718,75 @@ test("help and dialog windows open", function()
 end)
 
 --------------------------------------------------------------------------------
+suite("sessions and the agent")
+--------------------------------------------------------------------------------
+
+local terminal = require("ssh_launcher.terminal")
+local agent = require("ssh_launcher.agent")
+
+test("exit statuses are reported in words, not raw numbers", function()
+  eq(terminal.describe_exit(0), "finished")
+  contains(terminal.describe_exit(129), "hung up", "SIGHUP")
+  contains(terminal.describe_exit(130), "interrupted", "SIGINT")
+  contains(terminal.describe_exit(143), "terminated", "SIGTERM")
+  contains(terminal.describe_exit(255), "could not establish", "ssh's catch-all")
+  contains(terminal.describe_exit(2), "status 2", "an ordinary status is left alone")
+end)
+
+test("closing a session is not reported as a failure", function()
+  local script = TMP .. "/sleeper"
+  vim.fn.writefile({ "#!/bin/sh", "sleep 30" }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+
+  local warned = false
+  local original = vim.notify
+  vim.notify = function(msg, level, o)
+    if level == vim.log.levels.WARN then
+      warned = true
+    end
+    return original(msg, level, o)
+  end
+
+  local handle = terminal.run({ script }, { title = "T", strategy = "current", start_insert = false })
+  vim.wait(300, function()
+    return false
+  end)
+  -- Deleting the buffer SIGHUPs the job: status 129, but the user asked for it.
+  terminal.close(handle)
+  vim.wait(500, function()
+    return false
+  end)
+  vim.notify = original
+
+  falsy(warned, "closing a window must not raise a warning")
+end)
+
+test("only a locked key that the agent lacks asks to be unlocked", function()
+  if not util.has_executable("ssh-keygen") then
+    return
+  end
+  eq(agent.unlock_state(nil).needed, false, "no key")
+  eq(agent.unlock_state(TMP .. "/does-not-exist").needed, false, "missing key")
+
+  local plain = TMP .. "/plain_key"
+  vim.fn.system({ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", plain, "-C", "test" })
+  eq(agent.unlock_state(plain).needed, false, "an unencrypted key needs no agent")
+
+  local locked = TMP .. "/locked_key"
+  vim.fn.system({ "ssh-keygen", "-q", "-t", "ed25519", "-N", "hunter2hunter2", "-f", locked, "-C", "test" })
+  local state = agent.unlock_state(locked)
+  truthy(state.needed, "a passphrase-protected key not in the agent should prompt")
+  truthy(state.reason == "not-loaded" or state.reason == "no-agent", "reason: " .. tostring(state.reason))
+  contains(state.detail, "passphrase", "the explanation")
+end)
+
+test("auto_add_keys is validated like every other enum", function()
+  local cfg = require("ssh_launcher.config").setup({ ssh = { auto_add_keys = "sometimes" } })
+  eq(cfg.ssh.auto_add_keys, "prompt")
+  configure()
+end)
+
+--------------------------------------------------------------------------------
 suite("end to end")
 --------------------------------------------------------------------------------
 

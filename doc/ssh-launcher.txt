@@ -285,6 +285,30 @@ fix them, edit the host, or connect anyway. Set
 Network checks (DNS resolution and a TCP probe) run in the background on
 libuv and never block the editor.
 
+                                                             *ssh-launcher-unlock*
+Unlocking keys~
+A passphrase-protected key that is not loaded in the agent makes ssh either
+prompt inside the session or fail outright, once per connection. When one is
+about to be used, connecting stops and offers to load it:
+
+    Unlock it now                     runs ssh-add; the passphrase is asked
+                                      for once, and every later connection
+                                      with that key is unattended
+    Connect without it                dial anyway and let ssh do the asking
+    Never ask again for this session
+    Cancel
+
+If no agent is running at all, one is started for this Neovim session and
+stopped again when you quit — a stray agent holding unlocked keys after the
+editor closes would be worse than not offering this.
+
+The same offer appears if a connection fails with status 255 and the host's key
+turns out to be the likely reason; accepting it unlocks and redials.
+
+Unencrypted keys never trigger any of this: they work straight off disk, so
+prompting about them would be noise. Control the whole behaviour with
+`ssh.auto_add_keys` ("prompt", "always", "never").
+
 ==============================================================================
 10. DIAGNOSTIC CODES                                          *ssh-launcher-codes*
 
@@ -463,6 +487,7 @@ Defaults in full: >lua
         connect_timeout = 10,
         server_alive_interval = 30,
         server_alive_count_max = 3,
+        auto_add_keys = "prompt",                -- prompt | always | never
         control_master = false,                  -- connection multiplexing
         control_path = vim.fn.stdpath("cache") .. "/ssh_launcher/cm-%C",
         control_persist = "10m",
@@ -645,8 +670,16 @@ permissions on `~/.ssh` and on every discovered key, the agent, your
 `ssh_config`, and every saved host.
 
 "It asks for my passphrase every time"~
-The key is not in the agent. Press `A` in the manager, or `<C-f>` on the host.
-On macOS the key is added with `--apple-use-keychain` so it is asked for once.
+It should not: when a host's key is passphrase-protected and missing from the
+agent, connecting offers to `ssh-add` it first — see |ssh-launcher-unlock|. If
+you dismissed that prompt, press `A` in the manager to load the key by hand.
+On macOS it is added with `--apple-use-keychain`, so it is asked for once ever.
+
+"exited with status 129"~
+129 is `128 + SIGHUP`: the process was hung up rather than exiting on its own.
+Closing the window does that deliberately and is no longer reported. Seeing it
+unprompted means the far end dropped the connection — a server-side timeout, a
+sleeping laptop, or a VPN that went down.
 
 "WARNING: UNPROTECTED PRIVATE KEY FILE"~
 Code SSH033. Press `f`; the key is chmod'ed to 0600 and `~/.ssh` to 0700.

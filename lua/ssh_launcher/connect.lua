@@ -11,6 +11,7 @@ local config = require("ssh_launcher.config")
 local Host = require("ssh_launcher.host")
 local store = require("ssh_launcher.store")
 local diagnostics = require("ssh_launcher.diagnostics")
+local agent = require("ssh_launcher.agent")
 local terminal = require("ssh_launcher.terminal")
 local history = require("ssh_launcher.history")
 local theme = require("ssh_launcher.ui.theme")
@@ -197,6 +198,91 @@ local function gate_diagnostics(h, opts, proceed)
   })
 end
 
+--- Offer to unlock the key before dialling.
+---
+--- This is the moment it matters: the key needs a passphrase, it is not in the
+--- agent, and without it ssh either prompts inside the session or fails
+--- outright. Doing it here means the passphrase is asked for once instead of on
+--- every connection.
+---@param h ssh_launcher.Host
+---@param opts table
+---@param proceed fun(host: ssh_launcher.Host)
+local function gate_agent(h, opts, proceed)
+  local cfg = config.get()
+  local policy = opts.auto_add_keys or cfg.ssh.auto_add_keys
+
+  if opts.force or policy == "never" then
+    return proceed(h)
+  end
+
+  local state = agent.unlock_state(h.identity_file)
+  if not state.needed then
+    return proceed(h)
+  end
+
+  --- Load the key, then carry on regardless of the outcome: a refused
+  --- passphrase should not block someone who wants to type it into ssh instead.
+  local function unlock()
+    agent.add(h.identity_file, { apple_keychain = true }, function()
+      proceed(h)
+    end)
+  end
+
+  local function with_agent()
+    if state.reason ~= "no-agent" then
+      return unlock()
+    end
+    agent.start(function(started, msg)
+      if not started then
+        log.warn(msg)
+        return proceed(h)
+      end
+      log.info(msg)
+      unlock()
+    end)
+  end
+
+  if policy == "always" then
+    return with_agent()
+  end
+
+  local choices = {
+    { label = "Unlock it now", value = "unlock", key = "u" },
+    { label = "Connect without it", value = "skip", key = "c" },
+    { label = "Never ask again for this session", value = "off", key = "n" },
+    { label = "Cancel", value = nil, key = "x" },
+  }
+
+  local lines = {
+    { { state.detail, theme.hl("Value") } },
+    { { "" } },
+  }
+  if state.reason == "no-agent" then
+    lines[#lines + 1] = { { "An agent will be started for this Neovim session and", theme.hl("Muted") } }
+    lines[#lines + 1] = { { "stopped again when you quit.", theme.hl("Muted") } }
+  else
+    lines[#lines + 1] = { { "ssh-add asks for the passphrase once; afterwards every", theme.hl("Muted") } }
+    lines[#lines + 1] = { { "connection using this key is unattended.", theme.hl("Muted") } }
+  end
+
+  dialog.choose({
+    title = ("%s Unlock the key first?"):format(theme.icon("key")),
+    lines = lines,
+    choices = choices,
+    on_choice = function(value)
+      if value == "unlock" then
+        with_agent()
+      elseif value == "skip" then
+        proceed(h)
+      elseif value == "off" then
+        config.get().ssh.auto_add_keys = "never"
+        log.info("not asking again this session (ssh.auto_add_keys = 'never' makes it permanent)")
+        proceed(h)
+      end
+    end,
+  })
+end
+
 ---@param h ssh_launcher.Host
 ---@param opts table
 ---@param proceed fun(host: ssh_launcher.Host)
@@ -297,14 +383,26 @@ local function launch(h, opts)
         exit_code = code,
         duration = util.now() - started,
       })
-      if code ~= 0 then
-        -- ssh's own exit codes are famously unhelpful; translate the common ones.
-        local explain = {
-          [255] = "ssh could not establish the connection (auth failure, unreachable host, or a bad option)",
-          [130] = "interrupted",
-        }
-        if explain[code] then
-          log.warn(("%s: %s"):format(Host.label(h), explain[code]))
+      -- 255 is ssh's catch-all for "could not connect", and by far the most
+      -- common cause is a key the agent never offered. Rather than leaving the
+      -- user to work that out, check and offer the fix.
+      if code == 255 and not opts.retried then
+        local state = agent.unlock_state(h.identity_file)
+        if state.needed and config.get().ssh.auto_add_keys ~= "never" then
+          dialog.confirm({
+            title = ("%s Connection failed — unlock the key and retry?"):format(theme.icon("key")),
+            lines = {
+              { { ("%s could not connect."):format(Host.label(h)), theme.hl("Value") } },
+              { { "" } },
+              { { state.detail, theme.hl("Warn") } },
+            },
+            yes = "Unlock and retry",
+          }, function(confirmed)
+            if confirmed then
+              M.connect(h, vim.tbl_extend("force", opts, { retried = true, auto_add_keys = "always", new = true }))
+            end
+          end)
+          return
         end
       end
     end,
@@ -357,8 +455,10 @@ function M.connect(h, opts)
 
   gate_reuse(h, opts, function(h1)
     gate_diagnostics(h1, opts, function(h2)
-      gate_production(h2, opts, function(h3)
-        launch(h3, opts)
+      gate_agent(h2, opts, function(h3)
+        gate_production(h3, opts, function(h4)
+          launch(h4, opts)
+        end)
       end)
     end)
   end)

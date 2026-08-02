@@ -58,6 +58,9 @@ forwarding off by default, and never writes key material anywhere.
   sessions are reused rather than redialled.
 - **Bastions, forwards, remote commands** — `ProxyJump`, `-L`/`-R`/`-D`,
   landing directories, and per-host `ssh -o` options.
+- **Keys unlock themselves** — when a host's key needs a passphrase and isn't
+  loaded, connecting offers to `ssh-add` it first (starting an agent if there
+  isn't one), so you type the passphrase once instead of every time.
 - **ssh-agent, keygen, ssh-copy-id** from inside the manager.
 - **Production guard** — hosts tagged `prod` confirm before opening.
 - **Connection multiplexing** — opt-in `ControlMaster`; reconnects in

@@ -125,8 +125,11 @@ local function check_agent()
     return
   end
   if #loaded == 0 then
+    local policy = require("ssh_launcher.config").get().ssh.auto_add_keys
     warn("the agent is running but holds no identities", {
-      "Add one from the manager with A, or run: ssh-add ~/.ssh/id_ed25519",
+      policy == "never" and "ssh.auto_add_keys is 'never', so keys are never loaded for you."
+        or ("Locked keys are loaded on demand (ssh.auto_add_keys = %q)."):format(policy),
+      "To load one now: press A in the manager, or run ssh-add ~/.ssh/id_ed25519",
     })
   else
     ok(("%d identit%s loaded"):format(#loaded, #loaded == 1 and "y" or "ies"))
