@@ -369,6 +369,19 @@ local function launch(h, opts)
     title = Host.label(h),
     strategy = opts.strategy,
     height = opts.height,
+    -- Another plugin destroyed the buffer and killed ssh with it. The
+    -- environment is now known to be hostile, so a second attempt opens with
+    -- TermOpen suppressed and succeeds. Once only, so a persistent conflict
+    -- cannot become a loop.
+    on_hijack = function()
+      if opts.hijack_retried then
+        return
+      end
+      sessions[id] = nil
+      vim.schedule(function()
+        M.connect(h, vim.tbl_extend("force", opts, { hijack_retried = true, new = true, force = true }))
+      end)
+    end,
     -- The handle comes in as an argument: the `local handle = terminal.run(…)`
     -- being assigned here is not yet in scope inside this closure.
     on_exit = function(code, handle)

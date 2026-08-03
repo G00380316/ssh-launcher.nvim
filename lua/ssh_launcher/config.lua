@@ -90,11 +90,14 @@ M.defaults = {
     --- TermOpen, which is fired by the job rather than by the window command —
     --- use `eventignore` for that.
     noautocmd = false,
-    --- Events suppressed for the whole of opening a session (window creation
-    --- and job start). This is the blunt instrument for a configuration that
-    --- closes or hijacks terminal windows: `{ "TermOpen" }` is usually enough,
-    --- `"all"` disables every autocommand for those few milliseconds.
-    --- Empty by default, because it also disables legitimate terminal setup.
+    --- Keep other plugins' `TermOpen` handlers away from session buffers.
+    --- "auto" (default) does so only when a third-party TermOpen hook is
+    --- actually installed — floaterm, toggleterm and similar adopt every
+    --- terminal buffer that appears, and re-hosting ours destroys it, which
+    --- kills ssh. `true` always suppresses, `false` never does.
+    protect = "auto",
+    --- Further events suppressed for the whole of opening a session (window
+    --- creation and job start). `{ "all" }` is the sledgehammer.
     eventignore = {},
     --- If the session window is gone a tick after opening, put it back and say
     --- so. Guards against autocommands, session managers and pickers restoring
@@ -279,6 +282,7 @@ M.did_setup = false
 local enums = {
   ["ssh.strict_host_key_checking"] = { "yes", "accept-new", "no", "ask" },
   ["ssh.auto_add_keys"] = { "prompt", "always", "never" },
+  ["terminal.protect"] = { "auto", true, false },
   ["terminal.strategy"] = { "tab", "float", "vsplit", "split", "current", "tmux" },
   ["ui.sort"] = { "frecency", "name", "recent", "host", "manual" },
   ["ui.picker"] = { "manager", "telescope", "fzf-lua", "snacks", "select", "auto" },

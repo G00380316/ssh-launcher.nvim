@@ -313,16 +313,39 @@ function M.doctor()
   local connect = require("ssh_launcher.connect")
   local Host = require("ssh_launcher.host")
 
+  local terminal = require("ssh_launcher.terminal")
+  local hooks = terminal.third_party_term_hooks()
+  local shielded = cfg.terminal.protect == true
+    or terminal.hostile_environment
+    or (cfg.terminal.protect == "auto" and #hooks > 0)
+
   local lines = {
     "Session window settings",
-    ("  strategy       %s"):format(cfg.terminal.strategy),
-    ("  noautocmd      %s"):format(tostring(cfg.terminal.noautocmd)),
+    ("  strategy       %s"):format(
+      type(cfg.terminal.strategy) == "function" and "custom function" or tostring(cfg.terminal.strategy)
+    ),
+    ("  protect        %s   -> TermOpen currently %s"):format(
+      tostring(cfg.terminal.protect),
+      shielded and "SUPPRESSED for sessions" or "allowed to run"
+    ),
     ("  ensure_visible %s"):format(tostring(cfg.terminal.ensure_visible)),
+    ("  noautocmd      %s"):format(tostring(cfg.terminal.noautocmd)),
     ("  reuse          %s"):format(tostring(cfg.terminal.reuse)),
     ("  hidden         %s   (off unloads a terminal when its window closes)"):format(tostring(vim.o.hidden)),
     "",
-    "Open sessions",
+    "Terminal plugins detected",
   }
+
+  if #hooks == 0 then
+    lines[#lines + 1] = "  none — nothing else is adopting terminal buffers"
+  else
+    for _, group in ipairs(hooks) do
+      lines[#lines + 1] = ("  %s%s"):format(group, shielded and "   (kept away from sessions)" or "")
+    end
+  end
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Open sessions"
 
   connect.prune_sessions()
   local sessions = connect.sessions()
@@ -372,9 +395,9 @@ function M.doctor()
     lines[#lines + 1] = "  If a session window keeps disappearing, one of the groups above is doing it."
     lines[#lines + 1] = "  (nvim.terminal is Neovim's own and is never the cause.)"
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "  Inspect one with:   :verbose autocmd TermOpen"
-    lines[#lines + 1] = '  Stop them running:  terminal.eventignore = { "TermOpen" }   -- or { "all" }'
-    lines[#lines + 1] = "  Window events only: terminal.noautocmd = true"
+    lines[#lines + 1] = "  Inspect one with:  :verbose autocmd TermOpen"
+    lines[#lines + 1] = "  Force protection:  terminal.protect = true"
+    lines[#lines + 1] = '  Last resort:       terminal.eventignore = { "all" }'
   end
 
   return require("ssh_launcher.ui.float").text(lines, {

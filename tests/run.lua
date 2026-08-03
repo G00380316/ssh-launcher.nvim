@@ -946,6 +946,95 @@ test("losing a window once protects every session after it", function()
   configure()
 end)
 
+--- A floating-terminal manager: adopts every terminal buffer that appears and
+--- destroys it to re-host it. Destroying the buffer closes the pty, which kills
+--- ssh — this is the shape of plugin that made connections fail outright.
+---@param name string
+---@return fun() remove, fun(): integer adoptions
+local function install_terminal_manager(name)
+  local adoptions = 0
+  vim.api.nvim_create_augroup(name, { clear = true })
+  vim.api.nvim_create_autocmd("TermOpen", {
+    group = name,
+    callback = function()
+      adoptions = adoptions + 1
+      local buf = vim.api.nvim_get_current_buf()
+      vim.schedule(function()
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end)
+    end,
+  })
+  return function()
+    vim.api.nvim_del_augroup_by_name(name)
+  end, function()
+    return adoptions
+  end
+end
+
+---@return string fake_ssh
+local function fake_ssh()
+  local script = TMP .. "/fake_ssh"
+  vim.fn.writefile({ "#!/bin/sh", "sleep 30" }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+  return script
+end
+
+local function close_all_sessions()
+  local connect = require("ssh_launcher.connect")
+  for _, s in ipairs(connect.sessions()) do
+    connect.close_session(s.id)
+  end
+  vim.wait(200, function()
+    return false
+  end)
+end
+
+test("a terminal manager cannot kill a session", function()
+  local remove, adoptions = install_terminal_manager("TestTerminalManager")
+  local connect = require("ssh_launcher.connect")
+
+  configure({ ssh = { binary = fake_ssh() }, terminal = { start_insert = false, protect = "auto" } })
+  terminal.hostile_environment = false
+  reset_store()
+
+  connect.connect(store.add({ name = "Target", host = "10.0.0.9", user = "me", port = 8087 }))
+  vim.wait(1500, function()
+    return false
+  end)
+
+  eq(adoptions(), 0, "the hook should never have run")
+  eq(#connect.live_sessions(), 1, "the session should be alive on the first attempt")
+
+  close_all_sessions()
+  remove()
+  terminal.hostile_environment = false
+  configure()
+end)
+
+test("a session destroyed anyway is reconnected automatically", function()
+  local remove, adoptions = install_terminal_manager("TestTerminalManager2")
+  local connect = require("ssh_launcher.connect")
+
+  -- Protection off, so the manager really does destroy the first session.
+  configure({ ssh = { binary = fake_ssh() }, terminal = { start_insert = false, protect = false } })
+  terminal.hostile_environment = false
+  reset_store()
+
+  connect.connect(store.add({ name = "Target", host = "10.0.0.9", user = "me", port = 8087 }))
+  vim.wait(2500, function()
+    return false
+  end)
+
+  truthy(adoptions() > 0, "the manager should have destroyed the first attempt")
+  truthy(terminal.hostile_environment, "the hijack should have been recorded")
+  eq(#connect.live_sessions(), 1, "the retry should have connected")
+
+  close_all_sessions()
+  remove()
+  terminal.hostile_environment = false
+  configure()
+end)
+
 test("a session that genuinely fails is still reported", function()
   local warned = warning_from_session({ "#!/bin/sh", "exit 1" })
   truthy(warned, "an ordinary non-zero exit must be reported")

@@ -95,6 +95,34 @@ end
 ---@type boolean
 M.hostile_environment = false
 
+--- Autocommand groups hooking TermOpen that are not Neovim's own or ours.
+---
+--- A floating-terminal manager adopts every terminal buffer that appears; when
+--- it re-hosts ours it can destroy the buffer, and destroying the buffer kills
+--- ssh. Knowing in advance that such a plugin is installed lets the very first
+--- connection protect itself, instead of one having to fail first.
+---@return string[]
+function M.third_party_term_hooks()
+  local out, seen = {}, {}
+  local ok, autocmds = pcall(vim.api.nvim_get_autocmds, { event = "TermOpen" })
+  if not ok then
+    return out
+  end
+  for _, au in ipairs(autocmds) do
+    local group = au.group_name
+    if
+      group
+      and not seen[group]
+      and not group:match("^nvim[%._]") -- Neovim's own runtime
+      and not group:match("^SshLauncher")
+    then
+      seen[group] = true
+      out[#out + 1] = group
+    end
+  end
+  return out
+end
+
 ---@param buf integer
 ---@return boolean
 local function is_displayed(buf)
@@ -256,10 +284,19 @@ function M.run(argv, opts)
     ignore = { ignore }
   end
   ignore = vim.deepcopy(ignore or {})
-  -- Having already lost a window once in this session, do not offer the next
-  -- one up to the same fate.
-  if M.hostile_environment and not vim.tbl_contains(ignore, "TermOpen") and not vim.tbl_contains(ignore, "all") then
+
+  -- Decide whether to keep TermOpen handlers away from this session.
+  local protect = cfg.terminal.protect
+  local hooks = {}
+  if protect == "auto" then
+    hooks = M.third_party_term_hooks()
+  end
+  local shield = protect == true or M.hostile_environment or (protect == "auto" and #hooks > 0)
+  if shield and not vim.tbl_contains(ignore, "TermOpen") and not vim.tbl_contains(ignore, "all") then
     ignore[#ignore + 1] = "TermOpen"
+    if #hooks > 0 then
+      log.debug(("suppressing TermOpen for this session; hooked by: %s"):format(table.concat(hooks, ", ")))
+    end
   end
   if type(ignore) == "table" and #ignore > 0 then
     previous_eventignore = vim.o.eventignore
@@ -360,28 +397,39 @@ function M.run(argv, opts)
   -- session manager, a picker restoring the layout it captured. Check once the
   -- current sequence of events has settled, and put the window back rather
   -- than leaving the user staring at "connecting to …" with nothing to show.
-  if cfg.terminal.ensure_visible then
-    vim.schedule(function()
-      if handle.closing or not vim.api.nvim_buf_is_valid(buf) or is_displayed(buf) then
-        return
+  vim.schedule(function()
+    -- The user closing it themselves this quickly is not a problem.
+    if handle.closed_by_us then
+      return
+    end
+
+    -- A destroyed buffer is the serious case: destroying it closed the pty,
+    -- which killed ssh. The session is gone, not merely hidden.
+    local destroyed = not vim.api.nvim_buf_is_valid(buf)
+    if not destroyed and is_displayed(buf) then
+      return
+    end
+
+    M.hostile_environment = true
+
+    if destroyed then
+      handle.hijacked = true
+      log.error(
+        ("%s: another plugin destroyed the session buffer, which killed ssh before it could connect. "):format(
+          handle.title
+        ) .. "Retrying with TermOpen suppressed. Run :Ssh doctor to see what did it."
+      )
+      if opts.on_hijack then
+        pcall(opts.on_hijack, handle)
       end
+      return
+    end
 
-      -- Remember, so later sessions are opened with TermOpen suppressed and do
-      -- not need rescuing at all. Announced once, because the user should know
-      -- their terminal plugin and this one are competing.
-      local first_time = not M.hostile_environment
-      M.hostile_environment = true
-
+    if cfg.terminal.ensure_visible then
       M.focus(handle)
-
-      if first_time then
-        log.warn(
-          ("%s: another plugin took the session window; it has been reopened. "):format(handle.title)
-            .. "Later connections suppress TermOpen automatically. Run :Ssh doctor to see what did it."
-        )
-      end
-    end)
-  end
+      log.warn(("%s: another plugin took the session window; it has been reopened."):format(handle.title))
+    end
+  end)
 
   local start_insert = opts.start_insert
   if start_insert == nil then
@@ -405,8 +453,10 @@ function M.close(handle)
     return
   end
   -- Deleting the buffer sends SIGHUP to the job; flag it so the resulting
-  -- non-zero status is not reported back as a failure.
+  -- non-zero status is not reported back as a failure. `closed_by_us`
+  -- additionally distinguishes this from another plugin destroying the buffer.
   handle.closing = true
+  handle.closed_by_us = true
   if handle.float then
     handle.float:close()
   end
