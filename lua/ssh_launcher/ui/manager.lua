@@ -525,7 +525,12 @@ function Manager:connect(strategy)
     return
   end
   self.win:close()
-  connect.connect(h, { strategy = strategy })
+  -- Let the window teardown settle before opening the session window, for the
+  -- same reason the picker integrations defer: whatever restores the layout
+  -- must finish before we add to it.
+  vim.schedule(function()
+    connect.connect(h, { strategy = strategy })
+  end)
 end
 
 function Manager:add(paste)

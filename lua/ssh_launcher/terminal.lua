@@ -89,12 +89,44 @@ local function spawn(buf, argv, opts)
   return job
 end
 
+--- Set once a session window has been taken away from us. From then on this
+--- Neovim session opens terminals with TermOpen suppressed, so the second
+--- connection does not have to be rescued like the first.
+---@type boolean
+M.hostile_environment = false
+
+---@param buf integer
+---@return boolean
+local function is_displayed(buf)
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(win) == buf then
+      return true
+    end
+  end
+  return false
+end
+
 ---@param opts table
 ---@return integer buf, ssh_launcher.Float|nil
 local function make_window(opts)
   local strategy = opts.strategy or config.get().terminal.strategy
   local buf = vim.api.nvim_create_buf(true, false)
   vim.bo[buf].bufhidden = "hide"
+
+  -- A function strategy hands window creation to the user, so a session can be
+  -- hosted by whatever terminal plugin they already use. It receives our
+  -- buffer and only has to put it on screen.
+  if type(strategy) == "function" then
+    local ok, err = pcall(strategy, buf, opts)
+    if not ok then
+      log.error(("terminal.strategy failed: %s; falling back to a tab"):format(tostring(err)))
+    elseif is_displayed(buf) then
+      return buf, nil
+    else
+      log.warn("terminal.strategy did not put the session on screen; falling back to a tab")
+    end
+    strategy = "tab"
+  end
 
   if strategy == "float" then
     local fcfg = config.get().terminal.float
@@ -113,14 +145,20 @@ local function make_window(opts)
     return buf, win
   end
 
+  -- `noautocmd` is the escape hatch for a configuration that reacts to window
+  -- and buffer events by rearranging or closing things. It suppresses the
+  -- events for the window we are creating only; the terminal itself still
+  -- fires TermOpen, so terminal-specific setup keeps working.
+  local prefix = config.get().terminal.noautocmd and "noautocmd " or ""
+
   if strategy == "tab" then
-    vim.cmd("tabnew")
+    vim.cmd(prefix .. "tabnew")
   elseif strategy == "vsplit" then
-    vim.cmd("vsplit")
+    vim.cmd(prefix .. "vsplit")
   elseif strategy == "split" then
-    vim.cmd(("botright %dsplit"):format(opts.height or math.floor(vim.o.lines * 0.4)))
+    vim.cmd(("%sbotright %dsplit"):format(prefix, opts.height or math.floor(vim.o.lines * 0.4)))
   elseif strategy ~= "current" then
-    vim.cmd("tabnew")
+    vim.cmd(prefix .. "tabnew")
   end
 
   -- `tabnew`/`split` create an empty [No Name] buffer that we immediately
@@ -209,7 +247,33 @@ function M.run(argv, opts)
     started_at = util.now(),
   }
 
-  local buf, win = make_window(vim.tbl_extend("force", opts, { strategy = strategy }))
+  -- Suppress the configured events for the whole of opening the session, then
+  -- restore unconditionally — leaving 'eventignore' set would break the
+  -- editor far worse than the problem it works around.
+  local ignore = cfg.terminal.eventignore
+  local previous_eventignore = nil
+  if type(ignore) == "string" then
+    ignore = { ignore }
+  end
+  ignore = vim.deepcopy(ignore or {})
+  -- Having already lost a window once in this session, do not offer the next
+  -- one up to the same fate.
+  if M.hostile_environment and not vim.tbl_contains(ignore, "TermOpen") and not vim.tbl_contains(ignore, "all") then
+    ignore[#ignore + 1] = "TermOpen"
+  end
+  if type(ignore) == "table" and #ignore > 0 then
+    previous_eventignore = vim.o.eventignore
+    vim.o.eventignore = table.concat(ignore, ",")
+  end
+
+  local ok_window, buf, win = pcall(make_window, vim.tbl_extend("force", opts, { strategy = strategy }))
+  if not ok_window then
+    if previous_eventignore ~= nil then
+      vim.o.eventignore = previous_eventignore
+    end
+    log.error(("could not open a window for %s: %s"):format(handle.title, tostring(buf)))
+    return nil
+  end
   handle.buf = buf
   handle.float = win
   handle.win = win and win.win or vim.api.nvim_get_current_win()
@@ -261,6 +325,12 @@ function M.run(argv, opts)
     end,
   })
 
+  -- The suppression window ends here: everything that the configured events
+  -- could have disrupted has happened.
+  if previous_eventignore ~= nil then
+    vim.o.eventignore = previous_eventignore
+  end
+
   if not handle.job or handle.job <= 0 then
     log.error(("could not start %s"):format(exe))
     return nil
@@ -282,6 +352,34 @@ function M.run(argv, opts)
     end
     pcall(function()
       vim.wo[handle.win].winhighlight = "Normal:" .. theme.hl("Normal")
+    end)
+  end
+
+  -- A session with a live process but no window on screen is invisible and
+  -- unusable, and the cause is always outside this plugin: an autocommand, a
+  -- session manager, a picker restoring the layout it captured. Check once the
+  -- current sequence of events has settled, and put the window back rather
+  -- than leaving the user staring at "connecting to …" with nothing to show.
+  if cfg.terminal.ensure_visible then
+    vim.schedule(function()
+      if handle.closing or not vim.api.nvim_buf_is_valid(buf) or is_displayed(buf) then
+        return
+      end
+
+      -- Remember, so later sessions are opened with TermOpen suppressed and do
+      -- not need rescuing at all. Announced once, because the user should know
+      -- their terminal plugin and this one are competing.
+      local first_time = not M.hostile_environment
+      M.hostile_environment = true
+
+      M.focus(handle)
+
+      if first_time then
+        log.warn(
+          ("%s: another plugin took the session window; it has been reopened. "):format(handle.title)
+            .. "Later connections suppress TermOpen automatically. Run :Ssh doctor to see what did it."
+        )
+      end
     end)
   end
 
@@ -346,6 +444,15 @@ function M.focus(handle, strategy)
   end
 
   strategy = strategy or config.get().terminal.strategy
+
+  if type(strategy) == "function" then
+    local ok = pcall(strategy, handle.buf, { title = handle.title })
+    if ok and is_displayed(handle.buf) then
+      handle.win = vim.api.nvim_get_current_win()
+      return true
+    end
+    strategy = "tab"
+  end
   if strategy == "float" then
     local fcfg = config.get().terminal.float
     handle.float = float.open({

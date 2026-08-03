@@ -301,6 +301,89 @@ function M.health()
   vim.cmd("checkhealth ssh_launcher")
 end
 
+--- Report anything in the running configuration that could interfere with a
+--- session window, and the state of any sessions already open.
+---
+--- When a terminal opens and then vanishes, the cause is an autocommand
+--- somewhere reacting to the window or buffer events. This lists the
+--- candidates by the group that registered them, which names the culprit.
+function M.doctor()
+  M.ensure_setup()
+  local cfg = require("ssh_launcher.config").get()
+  local connect = require("ssh_launcher.connect")
+  local Host = require("ssh_launcher.host")
+
+  local lines = {
+    "Session window settings",
+    ("  strategy       %s"):format(cfg.terminal.strategy),
+    ("  noautocmd      %s"):format(tostring(cfg.terminal.noautocmd)),
+    ("  ensure_visible %s"):format(tostring(cfg.terminal.ensure_visible)),
+    ("  reuse          %s"):format(tostring(cfg.terminal.reuse)),
+    ("  hidden         %s   (off unloads a terminal when its window closes)"):format(tostring(vim.o.hidden)),
+    "",
+    "Open sessions",
+  }
+
+  connect.prune_sessions()
+  local sessions = connect.sessions()
+  if #sessions == 0 then
+    lines[#lines + 1] = "  none"
+  end
+  for _, s in ipairs(sessions) do
+    local visible = false
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(w) == s.handle.buf then
+        visible = true
+      end
+    end
+    lines[#lines + 1] = ("  %-24s buf %-4d %s, %s"):format(
+      Host.label(s.host),
+      s.handle.buf,
+      s.ended_at and "exited" or "running",
+      visible and "on screen" or "NOT ON SCREEN — press S in the manager to jump to it"
+    )
+  end
+
+  -- Events that fire when a window or terminal buffer appears. Anything hooked
+  -- to these can move, hide or close the session window.
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Autocommands that can affect a session window"
+  local events = { "TermOpen", "TermClose", "BufWinEnter", "BufEnter", "WinEnter", "WinNew", "TabNewEntered", "BufNew" }
+  local seen = {}
+  local found = 0
+  for _, event in ipairs(events) do
+    local ok, autocmds = pcall(vim.api.nvim_get_autocmds, { event = event })
+    if ok then
+      for _, au in ipairs(autocmds) do
+        local group = au.group_name or "(no group)"
+        local key = event .. "/" .. group
+        if not seen[key] and group ~= "SshLauncherTheme" and not group:match("^SshLauncher") then
+          seen[key] = true
+          found = found + 1
+          lines[#lines + 1] = ("  %-14s %s"):format(event, group)
+        end
+      end
+    end
+  end
+  if found == 0 then
+    lines[#lines + 1] = "  none — your configuration is not hooking these events"
+  else
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "  If a session window keeps disappearing, one of the groups above is doing it."
+    lines[#lines + 1] = "  (nvim.terminal is Neovim's own and is never the cause.)"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "  Inspect one with:   :verbose autocmd TermOpen"
+    lines[#lines + 1] = '  Stop them running:  terminal.eventignore = { "TermOpen" }   -- or { "all" }'
+    lines[#lines + 1] = "  Window events only: terminal.noautocmd = true"
+  end
+
+  return require("ssh_launcher.ui.float").text(lines, {
+    title = "ssh-launcher doctor",
+    width = 0.8,
+    height = math.min(#lines + 2, math.floor(vim.o.lines * 0.8)),
+  })
+end
+
 --------------------------------------------------------------------------------
 -- Commands
 --------------------------------------------------------------------------------
@@ -417,6 +500,12 @@ local SUBCOMMANDS = {
     desc = "Run :checkhealth ssh_launcher",
     run = function()
       M.health()
+    end,
+  },
+  doctor = {
+    desc = "Diagnose session windows that open and then vanish",
+    run = function()
+      M.doctor()
     end,
   },
   version = {

@@ -54,8 +54,11 @@ forwarding off by default, and never writes key material anywhere.
 - **`~/.ssh/config` both ways** — existing hosts appear automatically
   (including `Include`); export writes into a delimited managed block that
   leaves the rest of your file untouched.
-- **Sessions anywhere** — tab, split, float, or a tmux window. Existing
-  sessions are reused rather than redialled.
+- **Sessions anywhere** — tab, split, float, tmux window, or your own terminal
+  plugin via a one-function `strategy`. Coexists with floaterm/toggleterm-style
+  managers: if one takes the session window, it's reopened and later sessions
+  protect themselves automatically. Existing sessions are reused rather than
+  redialled.
 - **Bastions, forwards, remote commands** — `ProxyJump`, `-L`/`-R`/`-D`,
   landing directories, and per-host `ssh -o` options.
 - **Keys unlock themselves** — when a host's key needs a passphrase and isn't

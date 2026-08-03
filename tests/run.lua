@@ -802,6 +802,150 @@ test("no teardown path reports a hangup as a failure", function()
   )
 end)
 
+test("a session window survives a configuration that closes it", function()
+  local script = TMP .. "/sleeper2"
+  vim.fn.writefile({ "#!/bin/sh", "sleep 30" }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+
+  -- Stand in for a session manager or layout plugin that reacts to TermOpen.
+  vim.api.nvim_create_augroup("SshLauncherTestHostile", { clear = true })
+  vim.api.nvim_create_autocmd("TermOpen", {
+    group = "SshLauncherTestHostile",
+    callback = function()
+      vim.schedule(function()
+        pcall(vim.cmd, "tabclose")
+      end)
+    end,
+  })
+
+  local function on_screen(buf)
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(w) == buf then
+        return true
+      end
+    end
+    return false
+  end
+
+  local function run_with(terminal_opts)
+    configure({ terminal = terminal_opts })
+    local handle = terminal.run({ script }, { title = "S", strategy = "tab", start_insert = false })
+    vim.wait(800, function()
+      return false
+    end)
+    local visible = on_screen(handle.buf)
+    pcall(terminal.close, handle)
+    vim.wait(200, function()
+      return false
+    end)
+    return visible
+  end
+
+  truthy(run_with({ ensure_visible = true }), "the window should have been reopened")
+  truthy(
+    run_with({ ensure_visible = false, eventignore = { "TermOpen" } }),
+    "eventignore should have stopped it closing in the first place"
+  )
+  eq(vim.o.eventignore, "", "eventignore must always be restored")
+
+  vim.api.nvim_del_augroup_by_name("SshLauncherTestHostile")
+  configure()
+end)
+
+test("a session can be hosted by someone else's window", function()
+  local script = TMP .. "/sleeper3"
+  vim.fn.writefile({ "#!/bin/sh", "sleep 30" }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+
+  local function on_screen(buf)
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(w) == buf then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- What an integration with a terminal plugin looks like.
+  local called = false
+  configure({
+    terminal = {
+      strategy = function(buf)
+        called = true
+        vim.cmd("botright 10split")
+        vim.api.nvim_win_set_buf(0, buf)
+      end,
+    },
+  })
+  local handle = terminal.run({ script }, { title = "custom", start_insert = false })
+  vim.wait(400, function()
+    return false
+  end)
+  truthy(called, "the strategy function was not called")
+  truthy(on_screen(handle.buf), "the custom strategy's window")
+  pcall(terminal.close, handle)
+
+  -- A strategy that fails to display anything must not lose the session.
+  configure({ terminal = { strategy = function() end } })
+  local orphan = terminal.run({ script }, { title = "broken", start_insert = false })
+  vim.wait(400, function()
+    return false
+  end)
+  truthy(on_screen(orphan.buf), "a broken strategy should fall back, not lose the session")
+  pcall(terminal.close, orphan)
+
+  configure()
+end)
+
+test("losing a window once protects every session after it", function()
+  local script = TMP .. "/sleeper4"
+  vim.fn.writefile({ "#!/bin/sh", "sleep 30" }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+
+  vim.api.nvim_create_augroup("SshLauncherTestGrabby", { clear = true })
+  vim.api.nvim_create_autocmd("TermOpen", {
+    group = "SshLauncherTestGrabby",
+    callback = function()
+      local win = vim.api.nvim_get_current_win()
+      vim.schedule(function()
+        pcall(vim.api.nvim_win_close, win, true)
+      end)
+    end,
+  })
+
+  configure()
+  terminal.hostile_environment = false
+
+  local first = terminal.run({ script }, { title = "first", start_insert = false })
+  vim.wait(600, function()
+    return false
+  end)
+  truthy(terminal.hostile_environment, "the grab should have been noticed")
+  pcall(terminal.close, first)
+  vim.wait(150, function()
+    return false
+  end)
+
+  -- The second one suppresses TermOpen by itself, so it is never taken.
+  local second = terminal.run({ script }, { title = "second", start_insert = false })
+  vim.wait(600, function()
+    return false
+  end)
+  local visible = false
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(w) == second.buf then
+      visible = true
+    end
+  end
+  truthy(visible, "the second session should never have been taken")
+  eq(vim.o.eventignore, "", "eventignore must always be restored")
+
+  pcall(terminal.close, second)
+  vim.api.nvim_del_augroup_by_name("SshLauncherTestGrabby")
+  terminal.hostile_environment = false
+  configure()
+end)
+
 test("a session that genuinely fails is still reported", function()
   local warned = warning_from_session({ "#!/bin/sh", "exit 1" })
   truthy(warned, "an ordinary non-zero exit must be reported")

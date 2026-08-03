@@ -14,6 +14,23 @@ local theme = require("ssh_launcher.ui.theme")
 
 local M = {}
 
+--- Hand a selection back only once the picker has finished closing.
+---
+--- Every picker restores the window layout it captured on open, and some do it
+--- asynchronously. Opening a session window from inside the confirm callback
+--- races that restore, and the terminal we just created gets closed or hidden
+--- again the moment the picker finishes tidying up.
+---@param cb fun(h: ssh_launcher.Host)
+---@param h ssh_launcher.Host|nil
+local function deferred(cb, h)
+  if not h then
+    return
+  end
+  vim.schedule(function()
+    cb(h)
+  end)
+end
+
 ---@param h ssh_launcher.Host
 ---@return string
 local function display(h)
@@ -100,9 +117,7 @@ local function with_telescope(cb)
         actions.select_default:replace(function()
           local entry = action_state.get_selected_entry()
           actions.close(bufnr)
-          if entry then
-            cb(entry.value)
-          end
+          deferred(cb, entry and entry.value or nil)
         end)
         return true
       end,
@@ -130,10 +145,7 @@ local function with_fzf_lua(cb)
     prompt = "SSH hosts> ",
     actions = {
       ["default"] = function(selected)
-        local h = selected and by_display[selected[1]]
-        if h then
-          cb(h)
-        end
+        deferred(cb, selected and by_display[selected[1]] or nil)
       end,
     },
   })
@@ -159,9 +171,7 @@ local function with_snacks(cb)
     end,
     confirm = function(picker, item)
       picker:close()
-      if item then
-        cb(item.host)
-      end
+      deferred(cb, item and item.host or nil)
     end,
   })
   return true

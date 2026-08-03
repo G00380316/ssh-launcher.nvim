@@ -73,7 +73,9 @@ M.defaults = {
   -- Terminal / window behaviour
   ---------------------------------------------------------------------------
   terminal = {
-    --- "tab" | "float" | "vsplit" | "split" | "current" | "tmux"
+    --- "tab" | "float" | "vsplit" | "split" | "current" | "tmux", or a function
+    --- `fun(buf: integer, opts: table)` that puts `buf` on screen however you
+    --- like — the hook for hosting sessions in your own terminal plugin.
     strategy = "tab",
     --- Reuse an existing live session for the same host instead of dialling again.
     reuse = true,
@@ -83,6 +85,21 @@ M.defaults = {
     close_on_exit = false,
     --- Keep the buffer but show the exit status when ssh fails.
     notify_on_exit = true,
+    --- Create the session window with `noautocmd`, so a configuration that
+    --- reacts to window events cannot rearrange it. Note this does *not* cover
+    --- TermOpen, which is fired by the job rather than by the window command —
+    --- use `eventignore` for that.
+    noautocmd = false,
+    --- Events suppressed for the whole of opening a session (window creation
+    --- and job start). This is the blunt instrument for a configuration that
+    --- closes or hijacks terminal windows: `{ "TermOpen" }` is usually enough,
+    --- `"all"` disables every autocommand for those few milliseconds.
+    --- Empty by default, because it also disables legitimate terminal setup.
+    eventignore = {},
+    --- If the session window is gone a tick after opening, put it back and say
+    --- so. Guards against autocommands, session managers and pickers restoring
+    --- a layout over the top of it.
+    ensure_visible = true,
     --- Buffer-local options applied to session terminals.
     buf_options = {},
     win_options = { number = false, relativenumber = false, signcolumn = "no" },
@@ -301,6 +318,10 @@ local function validate(opts)
 
   for path, allowed in pairs(enums) do
     local value = get_path(opts, path)
+    -- A function strategy is a valid alternative to any named one.
+    if path == "terminal.strategy" and type(value) == "function" then
+      value = nil
+    end
     if value ~= nil and not vim.tbl_contains(allowed, value) then
       problems[#problems + 1] = ("%s = %q is not one of: %s (using default)"):format(
         path,

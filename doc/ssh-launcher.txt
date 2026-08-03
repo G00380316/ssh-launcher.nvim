@@ -126,6 +126,9 @@ edit them.
 :Ssh keygen             Generate a new key pair.
 :Ssh reload             Re-read the host database and `~/.ssh/config`.
 :Ssh health             Run `:checkhealth ssh_launcher`.
+:Ssh doctor             Diagnose session windows that open and then vanish:
+                        lists open sessions, whether each is on screen, and the
+                        autocommand groups that could be interfering.
 :Ssh version            Print the plugin version.
 
 Completion works for subcommands, host names and file paths.
@@ -246,7 +249,7 @@ Understood formats: >
 Shell prompt characters (`$`, `#`, `>`), `sudo`, quoting, backslash line
 continuations and trailing remote commands are all handled.
 
-Two things are deliberately *not* carried over:
+Two things are deliberately NOT carried over:
 
 - `StrictHostKeyChecking=no` — you are told it was dropped and why.
 - Anything that looks like a password or a private key — the paste is refused
@@ -409,7 +412,7 @@ modification time rather than overwritten.
 Accessibility here is a property of the data model, not a mode you switch on.
 
 Never colour alone~
-Every status has a glyph *and* a word. Rows carry a text marker (`up`, `dn`,
+Every status has a glyph AND a word. Rows carry a text marker (`up`, `dn`,
 `err`) alongside the icon; severities are spelled out in full in dialogs and
 diagnostic views.
 
@@ -499,11 +502,16 @@ Defaults in full: >lua
       },
 
       terminal = {
-        strategy = "tab",  -- tab | float | vsplit | split | current | tmux
+        -- tab | float | vsplit | split | current | tmux, or a function
+        -- fun(buf, opts) that displays `buf` — see |ssh-launcher-terminal|
+        strategy = "tab",
         reuse = true,
         start_insert = true,
         close_on_exit = false,
         notify_on_exit = true,
+        noautocmd = false,          -- create the window with `noautocmd`
+        ensure_visible = true,      -- reopen it if something closes it
+        eventignore = {},           -- e.g. { "TermOpen" }, or { "all" }
         buf_options = {},
         win_options = { number = false, relativenumber = false, signcolumn = "no" },
         float = { width = 0.9, height = 0.85, border = "rounded" },
@@ -674,6 +682,58 @@ It should not: when a host's key is passphrase-protected and missing from the
 agent, connecting offers to `ssh-add` it first — see |ssh-launcher-unlock|. If
 you dismissed that prompt, press `A` in the manager to load the key by hand.
 On macOS it is added with `--apple-use-keychain`, so it is asked for once ever.
+
+                                                           *ssh-launcher-terminal*
+Working with another terminal plugin~
+Floating-terminal managers (floaterm, toggleterm and friends) hook `TermOpen`
+for every terminal buffer, including this plugin's. That can move or close a
+session window straight after it opens.
+
+Nothing needs configuring for this. The first time a session window is taken
+away it is reopened, and every session after it in that Neovim run is opened
+with `TermOpen` suppressed, so it cannot happen twice. You are told once.
+
+To go further, hand window creation to the plugin you already use:
+>lua
+    require("ssh_launcher").setup({
+      terminal = {
+        -- Any function that puts the given buffer on screen.
+        strategy = function(buf, opts)
+          require("toggleterm.terminal").Terminal
+            :new({ bufnr = buf, direction = "float", display_name = opts.title })
+            :open()
+        end,
+      },
+    })
+<
+The function receives this plugin's terminal buffer and only has to display
+it. If it raises, or returns without showing anything, the session falls back
+to a tab rather than being lost.
+
+                                                             *ssh-launcher-window*
+"connecting to …" but no terminal appears~
+The session started — the process is running — but something took its window
+away. This is always outside the plugin: an autocommand on `TermOpen` or
+`WinEnter`, a session or layout manager, or a picker restoring the layout it
+captured when it opened.
+
+`terminal.ensure_visible` (on by default) notices and reopens the window, and
+says so. To find the cause: >
+    :Ssh doctor
+<
+which lists the open sessions, whether each is on screen, and every
+autocommand group hooked to the events that could interfere. Then either fix
+that group, or stop it running at all: >lua
+    require("ssh_launcher").setup({
+      terminal = { eventignore = { "TermOpen" } },  -- or { "all" }
+    })
+<
+`terminal.noautocmd = true` is a lighter version that only covers the window
+command; it does NOT stop a `TermOpen` hook, because that event comes from
+the job rather than the window.
+
+Meanwhile `:Ssh sessions` always lists what is running and jumps to it, so a
+session is never actually lost.
 
 "the connection was hung up" / "exited with status 129"~
 129 is `128 + SIGHUP`. A local `ssh` receives that when its pty is destroyed,
