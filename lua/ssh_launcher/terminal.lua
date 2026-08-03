@@ -104,10 +104,17 @@ function M.capture_tail(buf, limit)
   return table.concat(kept, "\n")
 end
 
+--- A session that ran for at least this long got far enough to be a session:
+--- it authenticated, it had a shell. How its exit should be described depends
+--- entirely on which side of this line it falls.
+M.ESTABLISHED_MS = 5000
+
 --- Plain-English rendering of a process exit status.
 ---@param code integer
+---@param opts { established: boolean|nil }|nil
 ---@return string
-function M.describe_exit(code)
+function M.describe_exit(code, opts)
+  opts = opts or {}
   if code == 0 then
     return "finished"
   end
@@ -119,7 +126,14 @@ function M.describe_exit(code)
     return ("killed by signal %d"):format(code - 128)
   end
   if code == 255 then
-    return "ssh could not establish the connection"
+    -- 255 is ssh's own failure code, but only before a session exists. Once
+    -- one has been running, the same number means the link went away.
+    return opts.established and "the connection was closed" or "ssh could not establish the connection"
+  end
+  if opts.established then
+    -- After an interactive session ssh returns the remote shell's status, so
+    -- this is usually just the last command the user ran failing.
+    return ("session ended (remote status %d)"):format(code)
   end
   return ("exited with status %d"):format(code)
 end
@@ -489,7 +503,24 @@ function M.run(argv, opts)
           -- Only report an exit the user did not ask for, and say what the
           -- process actually printed — that is the part worth reading, and it
           -- may already have been deleted along with the buffer.
+          local established = (uv.now() - (handle.opened_at or 0)) >= M.ESTABLISHED_MS
+
           local function report()
+            if established then
+              -- The transcript here is the shell the user was just working in.
+              -- Quoting it back at them as though it explained a failure is
+              -- worse than saying nothing: a prompt is not an error message.
+              local message = ("%s: %s"):format(handle.title, M.describe_exit(code, { established = true }))
+              if code == 255 then
+                log.warn(message)
+              else
+                log.info(message)
+              end
+              return
+            end
+
+            -- Too short to have been a session: this is a connection failure,
+            -- and the last thing on screen is ssh explaining why.
             handle.output = M.capture_tail(buf) or handle.output
             local message = ("%s %s"):format(handle.title, M.describe_exit(code))
             if handle.output then
@@ -500,7 +531,7 @@ function M.run(argv, opts)
             log.warn(message)
           end
 
-          if handle.output == nil and vim.api.nvim_buf_is_valid(buf) then
+          if not established and handle.output == nil and vim.api.nvim_buf_is_valid(buf) then
             -- Exited before the pty flushed: wait a moment rather than
             -- reporting a failure with no explanation attached.
             vim.defer_fn(report, 80)

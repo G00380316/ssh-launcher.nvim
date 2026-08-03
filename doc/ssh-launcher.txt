@@ -788,6 +788,20 @@ the job rather than the window.
 Meanwhile `:Ssh sessions` always lists what is running and jumps to it, so a
 session is never actually lost.
 
+What a session's exit means~
+The same status means different things depending on whether a session ever
+existed, so it is reported accordingly:
+
+  before a session exists    255 is ssh failing to connect. The last lines it
+                             printed are included, because that is the reason.
+  after one has been running 255 means the connection was closed. Any other
+                             non-zero status is the remote shell's — usually
+                             the last command you ran — and is mentioned, not
+                             warned about.
+  exit 0                     nothing is reported.
+
+A session counts as established after five seconds (`terminal.ESTABLISHED_MS`).
+
 "the connection was hung up" / "exited with status 129"~
 129 is `128 + SIGHUP`. A local `ssh` receives that when its pty is destroyed,
 which only happens when the terminal buffer goes away — closing the window,

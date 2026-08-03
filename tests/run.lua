@@ -1156,6 +1156,64 @@ test("session buffers are identifiable by other plugins", function()
   configure()
 end)
 
+test("an established session's exit is described as what it is", function()
+  local established = { established = true }
+  -- 255 means two completely different things either side of "did it connect".
+  contains(terminal.describe_exit(255), "could not establish", "before a session exists")
+  contains(terminal.describe_exit(255, established), "connection was closed", "after one has run")
+  -- and a non-zero status from an interactive session is the remote shell's,
+  -- not ssh failing.
+  contains(terminal.describe_exit(3, established), "remote status 3")
+  eq(terminal.describe_exit(0), "finished")
+end)
+
+test("quitting a working session does not raise a false alarm", function()
+  local previous = terminal.ESTABLISHED_MS
+  terminal.ESTABLISHED_MS = 400
+  configure({ terminal = { start_insert = false } })
+
+  ---@return string[] warnings, string[] infos
+  local function messages_from(body, wait)
+    local script = TMP .. "/exiting"
+    vim.fn.writefile(body, script)
+    vim.uv.fs_chmod(script, tonumber("755", 8))
+    local warnings, infos = {}, {}
+    local original = vim.notify
+    vim.notify = function(msg, level, o)
+      if level == vim.log.levels.WARN then
+        warnings[#warnings + 1] = msg
+      elseif level == vim.log.levels.INFO then
+        infos[#infos + 1] = msg
+      end
+      return original(msg, level, o)
+    end
+    local handle = terminal.run({ script }, { title = "S", strategy = "tab" })
+    vim.wait(wait, function()
+      return false
+    end)
+    vim.notify = original
+    pcall(terminal.close, handle)
+    vim.wait(100, function()
+      return false
+    end)
+    return warnings, infos
+  end
+
+  -- Worked, then the shell exited with the status of a failed command.
+  local warnings, infos = messages_from({ "#!/bin/sh", "echo '[user@host ~]$ '", "sleep 0.8", "exit 3" }, 1600)
+  eq(#warnings, 0, "a remote command's status is not a warning")
+  truthy(#infos > 0, "but it is worth mentioning")
+  contains(infos[1], "remote status 3")
+  falsy(infos[1]:find("$", 1, true), "the shell prompt must not be quoted as an error")
+
+  -- Worked, then exited cleanly: nothing to say at all.
+  local clean = messages_from({ "#!/bin/sh", "echo '[user@host ~]$ '", "sleep 0.8", "exit 0" }, 1600)
+  eq(#clean, 0, "a clean exit is silent")
+
+  terminal.ESTABLISHED_MS = previous
+  configure()
+end)
+
 test("a session that genuinely fails is still reported", function()
   local warned = warning_from_session({ "#!/bin/sh", "exit 1" })
   truthy(warned, "an ordinary non-zero exit must be reported")
