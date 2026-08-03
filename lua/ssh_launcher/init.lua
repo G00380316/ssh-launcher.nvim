@@ -314,7 +314,7 @@ function M.doctor()
   local Host = require("ssh_launcher.host")
 
   local terminal = require("ssh_launcher.terminal")
-  local hooks = terminal.third_party_term_hooks()
+  local hooks = terminal.third_party_hooks()
   local shielded = cfg.terminal.protect == true
     or terminal.hostile_environment
     or (cfg.terminal.protect == "auto" and #hooks > 0)
@@ -337,11 +337,14 @@ function M.doctor()
   }
 
   if #hooks == 0 then
-    lines[#lines + 1] = "  none — nothing else is adopting terminal buffers"
+    lines[#lines + 1] = "  none — nothing else reacts to these events"
   else
-    for _, group in ipairs(hooks) do
-      lines[#lines + 1] = ("  %s%s"):format(group, shielded and "   (kept away from sessions)" or "")
+    for _, hook in ipairs(hooks) do
+      lines[#lines + 1] = ("  %-14s %s"):format(hook.event, hook.group)
     end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = shielded and "  All of the above are kept away from session windows."
+      or "  These are allowed to run while a session opens."
   end
 
   lines[#lines + 1] = ""

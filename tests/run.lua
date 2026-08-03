@@ -1035,6 +1035,54 @@ test("a session destroyed anyway is reconnected automatically", function()
   configure()
 end)
 
+test("why ssh failed survives a config that deletes terminal buffers", function()
+  -- `TermClose -> bdelete` is an extremely common idiom, and it throws away
+  -- the transcript — including the one line explaining the failure.
+  vim.api.nvim_create_augroup("TestTermCloseCleanup", { clear = true })
+  vim.api.nvim_create_autocmd("TermClose", {
+    group = "TestTermCloseCleanup",
+    callback = function(ev)
+      vim.schedule(function()
+        pcall(vim.api.nvim_buf_delete, ev.buf, { force = true })
+      end)
+    end,
+  })
+
+  local script = TMP .. "/failing_ssh"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    "sleep 0.2",
+    "echo 'user@host: Permission denied (publickey).' >&2",
+    "sleep 0.1",
+    "exit 255",
+  }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+
+  local warned = nil
+  local original = vim.notify
+  vim.notify = function(msg, level, o)
+    if level == vim.log.levels.WARN then
+      warned = msg
+    end
+    return original(msg, level, o)
+  end
+
+  configure({ terminal = { start_insert = false } })
+  local handle = terminal.run({ script }, { title = "T", strategy = "tab" })
+  vim.wait(1500, function()
+    return false
+  end)
+  vim.notify = original
+
+  falsy(vim.api.nvim_buf_is_valid(handle.buf), "the config should have deleted the buffer")
+  eq(handle.output, "user@host: Permission denied (publickey).", "the transcript was kept")
+  truthy(warned, "the failure should have been reported")
+  contains(warned, "Permission denied", "the reason must reach the user")
+
+  vim.api.nvim_del_augroup_by_name("TestTermCloseCleanup")
+  configure()
+end)
+
 test("a session that genuinely fails is still reported", function()
   local warned = warning_from_session({ "#!/bin/sh", "exit 1" })
   truthy(warned, "an ordinary non-zero exit must be reported")

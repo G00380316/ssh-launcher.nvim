@@ -44,7 +44,39 @@ local SIGNALS = {
 ---@param code integer
 ---@return boolean
 function M.was_torn_down(handle, code)
-  return handle.closing == true or code == 129
+  -- Deliberately *not* keyed on `handle.closing`: a TermClose handler that
+  -- deletes the buffer sets that flag after ssh has already failed on its own,
+  -- and suppressing the report then would hide the very error the user needs.
+  -- A teardown that caused the exit always shows up as SIGHUP.
+  return code == 129 or handle.closed_by_us == true
+end
+
+--- The last meaningful lines a process left on screen.
+---@param buf integer
+---@param limit integer|nil how many non-blank lines to keep
+---@return string|nil
+function M.capture_tail(buf, limit)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return nil
+  end
+  local ok, lines = pcall(vim.api.nvim_buf_get_lines, buf, -200, -1, false)
+  if not ok then
+    return nil
+  end
+  local kept = {}
+  for i = #lines, 1, -1 do
+    local line = vim.trim(lines[i])
+    if line ~= "" then
+      table.insert(kept, 1, line)
+      if #kept >= (limit or 6) then
+        break
+      end
+    end
+  end
+  if #kept == 0 then
+    return nil
+  end
+  return table.concat(kept, "\n")
 end
 
 --- Plain-English rendering of a process exit status.
@@ -95,29 +127,42 @@ end
 ---@type boolean
 M.hostile_environment = false
 
---- Autocommand groups hooking TermOpen that are not Neovim's own or ours.
+--- Events fired while a session window is being created, any of which can be
+--- used to rearrange, replace or delete what we just made. A terminal manager
+--- hooks TermOpen; a layout manager hooks WinNew or BufWinEnter; a tab handler
+--- hooks TabNewEntered. All of them reach our buffer.
+M.PROTECTED_EVENTS = {
+  "TermOpen",
+  "BufNew",
+  "BufEnter",
+  "BufWinEnter",
+  "WinNew",
+  "WinEnter",
+  "TabNewEntered",
+}
+
+--- Third-party handlers on any of |ssh_launcher.terminal.PROTECTED_EVENTS|.
 ---
---- A floating-terminal manager adopts every terminal buffer that appears; when
---- it re-hosts ours it can destroy the buffer, and destroying the buffer kills
---- ssh. Knowing in advance that such a plugin is installed lets the very first
---- connection protect itself, instead of one having to fail first.
----@return string[]
-function M.third_party_term_hooks()
+--- Knowing in advance that such handlers exist lets the very first connection
+--- protect itself, instead of one having to fail first.
+---@return { event: string, group: string }[]
+function M.third_party_hooks()
   local out, seen = {}, {}
-  local ok, autocmds = pcall(vim.api.nvim_get_autocmds, { event = "TermOpen" })
-  if not ok then
-    return out
-  end
-  for _, au in ipairs(autocmds) do
-    local group = au.group_name
-    if
-      group
-      and not seen[group]
-      and not group:match("^nvim[%._]") -- Neovim's own runtime
-      and not group:match("^SshLauncher")
-    then
-      seen[group] = true
-      out[#out + 1] = group
+  for _, event in ipairs(M.PROTECTED_EVENTS) do
+    local ok, autocmds = pcall(vim.api.nvim_get_autocmds, { event = event })
+    if ok then
+      for _, au in ipairs(autocmds) do
+        local group = au.group_name or "(no group)"
+        local key = event .. "/" .. group
+        if
+          not seen[key]
+          and not group:match("^nvim[%._]") -- Neovim's own runtime
+          and not group:match("^SshLauncher")
+        then
+          seen[key] = true
+          out[#out + 1] = { event = event, group = group }
+        end
+      end
     end
   end
   return out
@@ -285,17 +330,21 @@ function M.run(argv, opts)
   end
   ignore = vim.deepcopy(ignore or {})
 
-  -- Decide whether to keep TermOpen handlers away from this session.
+  -- Decide whether to keep other plugins' handlers away from this session.
   local protect = cfg.terminal.protect
   local hooks = {}
   if protect == "auto" then
-    hooks = M.third_party_term_hooks()
+    hooks = M.third_party_hooks()
   end
   local shield = protect == true or M.hostile_environment or (protect == "auto" and #hooks > 0)
-  if shield and not vim.tbl_contains(ignore, "TermOpen") and not vim.tbl_contains(ignore, "all") then
-    ignore[#ignore + 1] = "TermOpen"
+  if shield and not vim.tbl_contains(ignore, "all") then
+    for _, event in ipairs(M.PROTECTED_EVENTS) do
+      if not vim.tbl_contains(ignore, event) then
+        ignore[#ignore + 1] = event
+      end
+    end
     if #hooks > 0 then
-      log.debug(("suppressing TermOpen for this session; hooked by: %s"):format(table.concat(hooks, ", ")))
+      log.debug(("shielding this session from %d third-party handler(s)"):format(#hooks))
     end
   end
   if type(ignore) == "table" and #ignore > 0 then
@@ -332,6 +381,20 @@ function M.run(argv, opts)
     desc = "ssh-launcher: note that a session's window went away",
     callback = function()
       handle.closing = true
+      handle.output = M.capture_tail(buf) or handle.output
+    end,
+  })
+
+  -- Take a copy of the transcript the moment the process exits, while the
+  -- buffer is guaranteed to be intact. Configurations very commonly delete
+  -- terminal buffers on TermClose; by the time BufUnload runs the text has
+  -- already been discarded, and ssh's reason for failing goes with it.
+  vim.api.nvim_create_autocmd("TermClose", {
+    buffer = buf,
+    once = true,
+    desc = "ssh-launcher: keep the session's last output",
+    callback = function()
+      handle.output = M.capture_tail(buf) or handle.output
     end,
   })
 
@@ -340,7 +403,14 @@ function M.run(argv, opts)
     cwd = opts.cwd,
     on_exit = function(_, code)
       handle.exit_code = code
+      -- Never overwrite a capture that already succeeded: TermClose runs before
+      -- this and is the reading with the buffer still intact, whereas by now
+      -- the terminal may already have been torn down.
+      handle.output = M.capture_tail(buf) or handle.output
       vim.schedule(function()
+        -- Try again now the pty has flushed; the process often exits before
+        -- its last words reach the buffer.
+        handle.output = M.capture_tail(buf) or handle.output
         if opts.on_exit then
           pcall(opts.on_exit, code, handle)
         end
@@ -354,9 +424,27 @@ function M.run(argv, opts)
         if close_on_exit and code == 0 then
           M.close(handle)
         elseif cfg.terminal.notify_on_exit and code ~= 0 and not M.was_torn_down(handle, code) then
-          -- Only report an exit the user did not ask for.
-          local hint = vim.api.nvim_buf_is_valid(buf) and " — press q to close the window" or ""
-          log.warn(("%s %s%s"):format(handle.title, M.describe_exit(code), hint))
+          -- Only report an exit the user did not ask for, and say what the
+          -- process actually printed — that is the part worth reading, and it
+          -- may already have been deleted along with the buffer.
+          local function report()
+            handle.output = M.capture_tail(buf) or handle.output
+            local message = ("%s %s"):format(handle.title, M.describe_exit(code))
+            if handle.output then
+              message = message .. ":\n" .. handle.output
+            elseif vim.api.nvim_buf_is_valid(buf) then
+              message = message .. " — press q to close the window"
+            end
+            log.warn(message)
+          end
+
+          if handle.output == nil and vim.api.nvim_buf_is_valid(buf) then
+            -- Exited before the pty flushed: wait a moment rather than
+            -- reporting a failure with no explanation attached.
+            vim.defer_fn(report, 80)
+          else
+            report()
+          end
         end
       end)
     end,
@@ -407,6 +495,14 @@ function M.run(argv, opts)
     -- which killed ssh. The session is gone, not merely hidden.
     local destroyed = not vim.api.nvim_buf_is_valid(buf)
     if not destroyed and is_displayed(buf) then
+      return
+    end
+
+    -- Unless the process had already finished on its own, in which case the
+    -- buffer being gone is just cleanup — a TermClose handler tidying up after
+    -- it. Blaming another plugin for that would be a misdiagnosis; the exit
+    -- itself is reported by `on_exit`, with the output it left behind.
+    if handle.exit_code ~= nil and handle.exit_code ~= 129 then
       return
     end
 

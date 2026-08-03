@@ -694,6 +694,14 @@ Worse, some of them destroy the buffer in order to re-host it. Destroying the
 buffer closes the pty, which kills ssh — the connection dies before it is made,
 and `:Ssh sessions` shows nothing.
 
+A related idiom deletes terminal buffers when the process exits: >lua
+    vim.api.nvim_create_autocmd("TermClose", { command = "bdelete!" })
+<
+That does not break the connection, but it does throw away the transcript,
+which is where ssh explains itself. The last output of a failed session is
+copied out before any such handler can run, and included in the message, so a
+failure always says why. The window layout events are protected the same way.
+
 Nothing needs configuring for this. `terminal.protect = "auto"` (the default)
 looks for third-party `TermOpen` hooks before opening a session and keeps them
 away from it, so the very first connection works. If one gets through anyway,
