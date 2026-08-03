@@ -5,6 +5,8 @@
 --- path, so no quoting bug can turn a hostname into a command.
 
 local util = require("ssh_launcher.util")
+
+local uv = util.uv
 local log = require("ssh_launcher.log")
 local config = require("ssh_launcher.config")
 local theme = require("ssh_launcher.ui.theme")
@@ -49,6 +51,29 @@ function M.was_torn_down(handle, code)
   -- and suppressing the report then would hide the very error the user needs.
   -- A teardown that caused the exit always shows up as SIGHUP.
   return code == 129 or handle.closed_by_us == true
+end
+
+--- A live session was destroyed by something other than the user. Report it
+--- once, remember the environment, and let the caller reconnect.
+---@param handle ssh_launcher.TerminalHandle
+---@param opts table
+function M.report_hijack(handle, opts)
+  if handle.hijacked then
+    return
+  end
+  handle.hijacked = true
+  M.hostile_environment = true
+
+  vim.schedule(function()
+    log.error(
+      ("%s: another plugin destroyed the session buffer, which killed ssh before it could connect. "):format(
+        handle.title
+      ) .. "Retrying with window events suppressed. Run :Ssh doctor to see what did it."
+    )
+    if opts and opts.on_hijack then
+      pcall(opts.on_hijack, handle)
+    end
+  end)
 end
 
 --- The last meaningful lines a process left on screen.
@@ -127,6 +152,29 @@ end
 ---@type boolean
 M.hostile_environment = false
 
+--- How long after opening a session its destruction is still attributed to
+--- another plugin rather than to the user. Layout guards act within
+--- milliseconds; a person closing a session they just opened does not.
+M.GRACE_MS = 5000
+
+--- Is this one of our session buffers?
+---
+--- Published as a contract for configurations that manage windows: a layout
+--- guard, tab hook or terminal manager can call this (or read `b:ssh_launcher`)
+--- to leave other people's terminals alone.
+---@param buf integer|nil defaults to the current buffer
+---@return boolean
+function M.is_session_buffer(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(buf) then
+    return false
+  end
+  local ok, marked = pcall(function()
+    return vim.b[buf].ssh_launcher
+  end)
+  return ok and marked == true
+end
+
 --- Events fired while a session window is being created, any of which can be
 --- used to rearrange, replace or delete what we just made. A terminal manager
 --- hooks TermOpen; a layout manager hooks WinNew or BufWinEnter; a tab handler
@@ -185,6 +233,9 @@ local function make_window(opts)
   local strategy = opts.strategy or config.get().terminal.strategy
   local buf = vim.api.nvim_create_buf(true, false)
   vim.bo[buf].bufhidden = "hide"
+  -- Marked before the buffer is ever displayed, so a window guard reacting to
+  -- the very first event can already tell whose terminal this is.
+  vim.b[buf].ssh_launcher = true
 
   -- A function strategy hands window creation to the user, so a session can be
   -- hosted by whatever terminal plugin they already use. It receives our
@@ -318,6 +369,7 @@ function M.run(argv, opts)
     argv = argv,
     title = opts.title or util.basename(exe),
     started_at = util.now(),
+    opened_at = uv.now(),
   }
 
   -- Suppress the configured events for the whole of opening the session, then
@@ -421,6 +473,16 @@ function M.run(argv, opts)
             M.close(handle)
           end, { buffer = buf, nowait = true, desc = "ssh-launcher: close session" })
         end
+        -- A session that dies of SIGHUP moments after opening, without the
+        -- user having closed it, was destroyed by something else — its buffer
+        -- was deleted and that took the pty with it. A process that ended on
+        -- its own reports a real status instead, so the two cannot be
+        -- confused, whatever order the events arrive in.
+        if code == 129 and not handle.closed_by_us and (uv.now() - (handle.opened_at or 0)) < M.GRACE_MS then
+          M.report_hijack(handle, opts)
+          return
+        end
+
         if close_on_exit and code == 0 then
           M.close(handle)
         elseif cfg.terminal.notify_on_exit and code ~= 0 and not M.was_torn_down(handle, code) then
@@ -509,15 +571,7 @@ function M.run(argv, opts)
     M.hostile_environment = true
 
     if destroyed then
-      handle.hijacked = true
-      log.error(
-        ("%s: another plugin destroyed the session buffer, which killed ssh before it could connect. "):format(
-          handle.title
-        ) .. "Retrying with TermOpen suppressed. Run :Ssh doctor to see what did it."
-      )
-      if opts.on_hijack then
-        pcall(opts.on_hijack, handle)
-      end
+      M.report_hijack(handle, opts)
       return
     end
 

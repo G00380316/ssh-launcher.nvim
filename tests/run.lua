@@ -1083,6 +1083,79 @@ test("why ssh failed survives a config that deletes terminal buffers", function(
   configure()
 end)
 
+test("a session destroyed by a timer is detected and reconnected", function()
+  -- No autocommand is involved, so event shielding cannot prevent this: the
+  -- only defence is noticing afterwards. Covers debounced layout guards,
+  -- buffer sweepers and anything else working off a timer.
+  local connect = require("ssh_launcher.connect")
+  configure({ ssh = { binary = fake_ssh() }, terminal = { start_insert = false } })
+  terminal.hostile_environment = false
+  reset_store()
+
+  local swept = 0
+  vim.defer_fn(function()
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[buf].buftype == "terminal" and vim.api.nvim_buf_is_loaded(buf) and swept == 0 then
+        swept = swept + 1
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+    end
+  end, 300)
+
+  connect.connect(store.add({ name = "Target", host = "10.0.0.9", user = "me", port = 8087 }))
+  vim.wait(2500, function()
+    return false
+  end)
+
+  eq(swept, 1, "the sweeper should have destroyed the first session")
+  truthy(terminal.hostile_environment, "destruction should have been noticed")
+  eq(#connect.live_sessions(), 1, "the session should have been reconnected")
+
+  close_all_sessions()
+  terminal.hostile_environment = false
+  configure()
+end)
+
+test("closing a session yourself is never mistaken for interference", function()
+  local connect = require("ssh_launcher.connect")
+  configure({ ssh = { binary = fake_ssh() }, terminal = { start_insert = false } })
+  terminal.hostile_environment = false
+  reset_store()
+
+  connect.connect(store.add({ name = "Target", host = "10.0.0.9", user = "me", port = 8087 }))
+  vim.wait(500, function()
+    return false
+  end)
+  eq(#connect.live_sessions(), 1, "the session should be up")
+
+  -- Well inside the grace period, so only `closed_by_us` distinguishes this
+  -- from a plugin destroying it.
+  close_all_sessions()
+  vim.wait(800, function()
+    return false
+  end)
+
+  eq(#connect.live_sessions(), 0, "closing it must not reconnect")
+  falsy(terminal.hostile_environment, "and must not be blamed on another plugin")
+  configure()
+end)
+
+test("session buffers are identifiable by other plugins", function()
+  configure({ ssh = { binary = fake_ssh() }, terminal = { start_insert = false } })
+  local handle = terminal.run({ fake_ssh() }, { title = "marked", strategy = "tab" })
+  vim.wait(300, function()
+    return false
+  end)
+
+  -- The contract a window guard keys on to leave our terminals alone.
+  eq(vim.b[handle.buf].ssh_launcher, true, "b:ssh_launcher")
+  truthy(terminal.is_session_buffer(handle.buf), "is_session_buffer()")
+  falsy(terminal.is_session_buffer(vim.api.nvim_create_buf(false, true)), "an unrelated buffer")
+
+  pcall(terminal.close, handle)
+  configure()
+end)
+
 test("a session that genuinely fails is still reported", function()
   local warned = warning_from_session({ "#!/bin/sh", "exit 1" })
   truthy(warned, "an ordinary non-zero exit must be reported")

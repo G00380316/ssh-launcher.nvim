@@ -401,6 +401,11 @@ function M.doctor()
     lines[#lines + 1] = "  Inspect one with:  :verbose autocmd TermOpen"
     lines[#lines + 1] = "  Force protection:  terminal.protect = true"
     lines[#lines + 1] = '  Last resort:       terminal.eventignore = { "all" }'
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "  If one of these groups is yours, the tidiest fix is to skip our buffers:"
+    lines[#lines + 1] = "    if vim.b[buf].ssh_launcher then return end"
+    lines[#lines + 1] = "  Session buffers are marked before they are ever displayed. See"
+    lines[#lines + 1] = "  :help ssh-launcher-marker"
   end
 
   return require("ssh_launcher.ui.float").text(lines, {

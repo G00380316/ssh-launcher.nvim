@@ -684,6 +684,35 @@ agent, connecting offers to `ssh-add` it first — see |ssh-launcher-unlock|. If
 you dismissed that prompt, press `A` in the manager to load the key by hand.
 On macOS it is added with `--apple-use-keychain`, so it is asked for once ever.
 
+                                                             *ssh-launcher-marker*
+Recognising a session buffer~
+Window guards, layout invariants, tab hooks and terminal managers all need a
+way to tell "my terminal" from "someone else's". Session buffers are marked
+before they are ever displayed, so the very first event a guard sees can
+already identify them:
+>lua
+    vim.b[buf].ssh_launcher == true                          -- the marker
+    require("ssh_launcher.terminal").is_session_buffer(buf)  -- the same test
+<
+The buffer is also named `ssh-launcher://<host>/<job>`. Prefer the marker: it
+is set earlier and is not affected by renames.
+
+A layout guard should bail out on a tab that contains one: >lua
+    local function foreign_terminal(tab)
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+        local buf = vim.api.nvim_win_get_buf(win)
+        if vim.bo[buf].buftype == "terminal" and not is_mine(buf) then
+          return true
+        end
+      end
+      return false
+    end
+<
+Reshaping windows around a connecting session is what tears it down: closing
+or deleting the buffer closes the pty, and that kills ssh. When it happens
+anyway, it is detected and the session is reconnected — see
+|ssh-launcher-window| — but not being interfered with is faster and quieter.
+
                                                            *ssh-launcher-terminal*
 Working with another terminal plugin~
 Floating-terminal managers (floaterm, toggleterm and friends) hook `TermOpen`
@@ -731,8 +760,18 @@ away. This is always outside the plugin: an autocommand on `TermOpen` or
 `WinEnter`, a session or layout manager, or a picker restoring the layout it
 captured when it opened.
 
-`terminal.ensure_visible` (on by default) notices and reopens the window, and
-says so. To find the cause: >
+Three defences cover this, in order:
+
+  1. Handlers on the events fired while a session opens are suppressed when
+     any third-party handler is installed (`terminal.protect`, default "auto").
+  2. If the window is closed anyway, it is reopened (`terminal.ensure_visible`).
+  3. If the *buffer* is destroyed — which kills ssh with it — the session is
+     reconnected, once, with events suppressed. This is detected however it
+     happens, including from a timer or a debounce that no event shielding
+     could have prevented, for the first five seconds of a session's life.
+     After that, a buffer going away is taken to be your own doing.
+
+To find the cause: >
     :Ssh doctor
 <
 which lists the open sessions, whether each is on screen, and every
