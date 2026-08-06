@@ -283,6 +283,62 @@ function Form:line_for(field)
   return self.line_of and self.line_of.name or 0
 end
 
+local PANEL_MARKER = "# ── problems "
+
+--- Mirror the diagnostics into the buffer as ordinary text.
+---
+--- Virtual text and floating diagnostics are invisible to a screen reader, and
+--- to anyone who has turned them off. Written as `#` comment lines below the
+--- fields, where the parser already ignores them, so the record is unaffected.
+function Form:render_panel()
+  if not config.get().a11y.diagnostics_panel or not self.win:valid() then
+    return
+  end
+  -- Rewriting lines under the cursor mid-keystroke is hostile; wait.
+  if self:in_insert() then
+    return
+  end
+
+  local buf = self.win.buf
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+  local start = nil
+  for i, line in ipairs(lines) do
+    if line:sub(1, #PANEL_MARKER) == PANEL_MARKER then
+      start = i - 1
+      break
+    end
+  end
+
+  local panel = {}
+  if #self.issues > 0 then
+    panel[#panel + 1] = ("%s(%s)"):format(PANEL_MARKER, diagnostics.summary(self.issues))
+    for _, issue in ipairs(self.issues) do
+      panel[#panel + 1] = ("#   %-5s %s  [%s]"):format(issue.severity, issue.message, issue.code)
+      if issue.detail then
+        for detail in (issue.detail .. "\n"):gmatch("(.-)\n") do
+          if detail ~= "" then
+            panel[#panel + 1] = "#       " .. detail
+          end
+        end
+      end
+      if issue.fix then
+        panel[#panel + 1] = ("#       fix available: %s  (<C-f>)"):format(issue.fix.label)
+      end
+    end
+  end
+
+  local view = vim.fn.winsaveview()
+  vim.bo[buf].modifiable = true
+  if start then
+    vim.api.nvim_buf_set_lines(buf, start, -1, false, panel)
+  elseif #panel > 0 then
+    vim.api.nvim_buf_set_lines(buf, -1, -1, false, panel)
+  end
+  vim.fn.winrestview(view)
+  self:decorate()
+end
+
 function Form:refresh_diagnostics()
   local cfg = config.get()
   self.issues = diagnostics.check(self.host, { hosts = self.context_hosts })
@@ -305,6 +361,7 @@ function Form:refresh_diagnostics()
     footer = ("%s %s"):format(theme.icon(counts.error > 0 and "error" or "warn"), diagnostics.summary(self.issues))
   end
   self.win:set_footer(footer .. "  ·  <C-d> details")
+  self:render_panel()
 
   if cfg.diagnostics.check_dns or cfg.diagnostics.check_reachability then
     local generation = (self.generation or 0) + 1
@@ -325,6 +382,7 @@ function Form:refresh_diagnostics()
         underline = true,
         signs = false,
       })
+      self:render_panel()
     end)
   end
 end

@@ -99,6 +99,9 @@ test("every module loads", function()
     "history",
     "connect",
     "health",
+    "tunnel",
+    "fleet",
+    "remote",
     "ui.theme",
     "ui.float",
     "ui.render",
@@ -1249,6 +1252,134 @@ test("auto_add_keys is validated like every other enum", function()
   local cfg = require("ssh_launcher.config").setup({ ssh = { auto_add_keys = "sometimes" } })
   eq(cfg.ssh.auto_add_keys, "prompt")
   configure()
+end)
+
+--------------------------------------------------------------------------------
+suite("tunnels, fleet and remote files")
+--------------------------------------------------------------------------------
+
+test("tunnels are raised, listed and stopped", function()
+  local tunnel = require("ssh_launcher.tunnel")
+  -- `ssh -N` holds the port open and prints nothing; a sleep behaves the same.
+  configure({ ssh = { binary = fake_ssh() } })
+  reset_store()
+
+  local h = store.add({
+    name = "db",
+    host = "10.0.0.9",
+    user = "me",
+    forwards = "L 15432:localhost:5432, D 1080",
+  })
+  eq(#h.forwards, 2, "the host should declare two forwards")
+
+  local opened, failures
+  tunnel.open_all(h, function(n, errs)
+    opened, failures = n, errs
+  end)
+  vim.wait(2000, function()
+    return opened ~= nil
+  end)
+
+  eq(opened, 2, "both forwards should be up: " .. vim.inspect(failures))
+  eq(#tunnel.for_host(h.id), 2)
+  truthy(tunnel.is_open(h, h.forwards[1]))
+
+  eq(tunnel.close_all(h), 2, "both should stop")
+  eq(#tunnel.for_host(h.id), 0)
+  eq(#tunnel.list(), 0)
+  configure()
+end)
+
+test("a tunnel is refused rather than left hanging on a passphrase", function()
+  if not util.has_executable("ssh-keygen") then
+    return
+  end
+  local tunnel = require("ssh_launcher.tunnel")
+  configure({ ssh = { binary = fake_ssh() } })
+
+  local locked = TMP .. "/tunnel_key"
+  vim.fn.delete(locked)
+  vim.fn.system({ "ssh-keygen", "-q", "-t", "ed25519", "-N", "hunter2hunter2", "-f", locked, "-C", "t" })
+
+  local h = Host.normalize({ name = "x", host = "10.0.0.9", identity_file = locked, forwards = "L 1:localhost:1" })
+  local ok, msg
+  tunnel.open(h, h.forwards[1], function(o, m)
+    ok, msg = o, m
+  end)
+  vim.wait(1500, function()
+    return ok ~= nil
+  end)
+
+  falsy(ok, "a background process cannot answer a passphrase prompt")
+  contains(msg, "unattended")
+  configure()
+end)
+
+test("a fleet command collects per-host results in order", function()
+  local fleet = require("ssh_launcher.fleet")
+  -- Stand-in ssh: echoes its last argument, and fails for one host.
+  local script = TMP .. "/fleet_ssh"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    'for a in "$@"; do last="$a"; done',
+    'case "$*" in *boom.example.com*) echo "boom" >&2; exit 7;; esac',
+    'echo "ran: $last"',
+  }, script)
+  vim.uv.fs_chmod(script, tonumber("755", 8))
+
+  configure({ ssh = { binary = script } })
+  reset_store()
+  local a = store.add({ name = "alpha", host = "10.0.0.1", user = "me" })
+  -- the name never reaches argv, so the failure is keyed on the target
+  local b = store.add({ name = "bad", host = "boom.example.com", user = "me" })
+  local c = store.add({ name = "gamma", host = "10.0.0.3", user = "me" })
+
+  local results
+  fleet.run({ a, b, c }, "uptime; whoami", { concurrency = 2 }, function(r)
+    results = r
+  end)
+  vim.wait(5000, function()
+    return results ~= nil
+  end)
+
+  truthy(results, "the fleet run never finished")
+  eq(#results, 3)
+  -- Reported in the order given, not the order they returned.
+  eq({ results[1].host.name, results[2].host.name, results[3].host.name }, { "alpha", "bad", "gamma" })
+  eq(results[1].code, 0)
+  eq(results[2].code, 7, "the failing host's status")
+  contains(results[2].stderr, "boom")
+  -- The command reached ssh as one argument, not split into shell words.
+  contains(results[1].stdout, "ran: uptime; whoami")
+
+  local rendered = table.concat(fleet.format("uptime", results), "\n")
+  contains(rendered, "2 ok, 1 failed", "the summary counts outcomes")
+  contains(rendered, "exit 7")
+  configure()
+end)
+
+test("scp transfers pass paths as separate arguments", function()
+  local remote = require("ssh_launcher.remote")
+  local h = Host.normalize({
+    name = "x",
+    host = "10.0.0.9",
+    user = "me",
+    port = 2222,
+    identity_file = "/tmp/key",
+  })
+
+  local argv = remote.scp_argv("put", h, "/srv/a file; rm -rf /", "/local/b.txt")
+  eq(argv[1], "scp")
+  truthy(vim.tbl_contains(argv, "-P"), "scp spells the port flag with a capital")
+  truthy(vim.tbl_contains(argv, "2222"))
+  truthy(vim.tbl_contains(argv, "IdentitiesOnly=yes"))
+  truthy(vim.tbl_contains(argv, "StrictHostKeyChecking=accept-new"))
+  -- The dangerous filename survives whole, as one argument.
+  truthy(vim.tbl_contains(argv, "me@10.0.0.9:/srv/a file; rm -rf /"), vim.inspect(argv))
+  eq(argv[#argv], "me@10.0.0.9:/srv/a file; rm -rf /", "put sends the remote path last")
+
+  local down = remote.scp_argv("get", h, "/srv/x", "/local/x")
+  eq(down[#down], "/local/x", "get sends the local path last")
 end)
 
 --------------------------------------------------------------------------------

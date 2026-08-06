@@ -224,7 +224,10 @@ function M.pick(cb, opts)
 end
 
 --- Telescope extension entry point (`:Telescope ssh_launcher`).
-function M.telescope()
+---@param opts table|nil accepted for the extension contract; the picker takes
+---  its configuration from `setup()`
+function M.telescope(opts)
+  local _ = opts
   local available = with_telescope(function(h)
     require("ssh_launcher.connect").connect(h)
   end)

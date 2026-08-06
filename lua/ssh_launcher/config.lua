@@ -218,6 +218,18 @@ M.defaults = {
   },
 
   ---------------------------------------------------------------------------
+  -- Running commands across several hosts
+  ---------------------------------------------------------------------------
+  fleet = {
+    --- How many hosts are contacted at once.
+    concurrency = 8,
+    --- Milliseconds before a host's command is abandoned.
+    timeout = 60000,
+    --- Confirm before running anything on more than this many hosts.
+    confirm_over = 3,
+  },
+
+  ---------------------------------------------------------------------------
   -- History / ranking
   ---------------------------------------------------------------------------
   history = {
@@ -254,6 +266,12 @@ M.defaults = {
     agent = "A",
     copy_id = "C",
     keygen = "G",
+    forget_host_key = "K",
+    tunnels = "L",
+    browse = "b",
+    upload = "U",
+    download = "W",
+    fleet_command = "!",
     yank_command = "y",
     open_terminal = "t",
     sessions = "S",
@@ -344,6 +362,8 @@ local function validate(opts)
     ["ui.height"] = { 0.1, 1.0 },
     ["ui.winblend"] = { 0, 100 },
     ["diagnostics.probe_timeout"] = { 100, 60000 },
+    ["fleet.concurrency"] = { 1, 64 },
+    ["fleet.timeout"] = { 1000, 600000 },
   }
   for path, range in pairs(numbers) do
     local value = get_path(opts, path)

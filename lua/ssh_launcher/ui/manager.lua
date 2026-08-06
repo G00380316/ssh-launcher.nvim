@@ -290,8 +290,10 @@ function Manager:draw()
   end
   self.win:set_title(title)
 
-  local footer = ("sort: %s  ·  <CR> connect  a add  p paste  e edit  d delete  / filter  ? help"):format(self.sort)
-  self.win:set_footer(footer)
+  if config.get().ui.show_footer then
+    local footer = ("sort: %s  ·  <CR> connect  a add  p paste  e edit  d delete  / filter  ? help"):format(self.sort)
+    self.win:set_footer(footer)
+  end
 end
 
 ---@return ssh_launcher.Host|nil
@@ -355,7 +357,11 @@ function Manager:draw_preview()
       facts[#facts + 1] = ("via: %s"):format(h.proxy_jump)
     end
     if h.forwards and #h.forwards > 0 then
-      facts[#facts + 1] = ("forwards: %s"):format(Host.forwards_to_string(h.forwards))
+      local open = #require("ssh_launcher.tunnel").for_host(h.id)
+      facts[#facts + 1] = ("forwards: %s%s"):format(
+        Host.forwards_to_string(h.forwards),
+        open > 0 and ("  [%d up]"):format(open) or ""
+      )
     end
     facts[#facts + 1] = ("used: %s (%d time%s)"):format(
       util.datetime(h.last_used_at),
@@ -443,10 +449,16 @@ function Manager:probe_all(force)
     end
   end, 120)
 
+  -- With reduce_motion the list is drawn once, when every probe has settled,
+  -- instead of shuffling status glyphs as results trickle in.
+  local live_updates = not config.get().a11y.reduce_motion
+
   probe.check_many(pending, {
     force = force,
     on_each = function()
-      redraw()
+      if live_updates then
+        redraw()
+      end
     end,
   }, function()
     redraw()
@@ -1025,6 +1037,177 @@ function Manager:copy_id()
   end)
 end
 
+--- Raise or drop a host's port forwards as background processes.
+function Manager:tunnels()
+  local h = self:current()
+  if not h then
+    return
+  end
+  local tunnel = require("ssh_launcher.tunnel")
+  local open = tunnel.for_host(h.id)
+
+  local lines = {}
+  if #open > 0 then
+    for _, t in ipairs(open) do
+      lines[#lines + 1] = {
+        { "  " .. theme.icon("ok") .. " ", theme.hl("Ok") },
+        { tunnel.describe(t.forward), theme.hl("Value") },
+        { ("   up %s"):format(util.ago(t.started_at)), theme.hl("Muted") },
+      }
+    end
+  elseif #(h.forwards or {}) == 0 then
+    lines[#lines + 1] = { { "  This host declares no port forwards.", theme.hl("Muted") } }
+    lines[#lines + 1] = { { "  Add them in the editor's Forwards field (e).", theme.hl("Muted") } }
+  else
+    for _, f in ipairs(h.forwards) do
+      lines[#lines + 1] = { { "  " .. tunnel.describe(f), theme.hl("Muted") } }
+    end
+  end
+
+  local choices = {}
+  if #(h.forwards or {}) > 0 then
+    if #open > 0 then
+      choices[#choices + 1] = { label = ("Drop %d tunnel(s)"):format(#open), value = "close", key = "d" }
+    end
+    if #open < #h.forwards then
+      choices[#choices + 1] = { label = "Raise them in the background", value = "open", key = "r" }
+    end
+  end
+  choices[#choices + 1] = { label = "Close", value = nil, key = "c" }
+
+  dialog.choose({
+    title = ("%s Tunnels — %s"):format(theme.icon("forward"), Host.label(h)),
+    lines = lines,
+    choices = choices,
+    on_choice = function(value)
+      if value == "open" then
+        tunnel.open_all(h, function(opened, failures)
+          for _, msg in ipairs(failures) do
+            log.warn(msg)
+          end
+          if opened > 0 then
+            log.info(("raised %d tunnel%s for %s"):format(opened, opened == 1 and "" or "s", Host.label(h)))
+          end
+          self:draw_preview()
+        end)
+      elseif value == "close" then
+        local closed = tunnel.close_all(h)
+        log.info(("dropped %d tunnel%s"):format(closed, closed == 1 and "" or "s"))
+        self:draw_preview()
+      end
+    end,
+  })
+end
+
+--- Run one command on every marked host.
+function Manager:fleet_command()
+  local targets = self:targets()
+  if #targets == 0 then
+    return
+  end
+
+  local fleet = require("ssh_launcher.fleet")
+  local cfg = config.get()
+
+  local function go(command)
+    self.win:close()
+    fleet.run_and_show(targets, command)
+  end
+
+  dialog.input({ prompt = ("Run on %d host(s): "):format(#targets), default = "" }, function(command)
+    if not command then
+      return
+    end
+    -- Running something on twenty machines at once deserves a second look.
+    if #targets > cfg.fleet.confirm_over then
+      local blocked = fleet.blocked(targets)
+      local lines = {
+        { { ("$ %s"):format(command), theme.hl("Value") } },
+        { { "" } },
+      }
+      for i, h in ipairs(targets) do
+        if i > 10 then
+          lines[#lines + 1] = { { ("  … and %d more"):format(#targets - 10), theme.hl("Muted") } }
+          break
+        end
+        lines[#lines + 1] = {
+          { "  " .. Host.label(h), Host.is_production(h) and theme.hl("Production") or theme.hl("Name") },
+          { blocked[h.id] and "   (will be skipped: key locked)" or "", theme.hl("Muted") },
+        }
+      end
+      dialog.confirm({
+        title = ("Run this on %d hosts?"):format(#targets),
+        lines = lines,
+        yes = "Run it",
+        destructive = true,
+        default_no = true,
+      }, function(confirmed)
+        if confirmed then
+          go(command)
+        end
+      end)
+    else
+      go(command)
+    end
+  end)
+end
+
+--- Open a remote directory in the editor.
+function Manager:browse()
+  local h = self:current()
+  if not h then
+    return
+  end
+  self.win:close()
+  require("ssh_launcher.remote").browse(h)
+end
+
+---@param direction "get"|"put"
+function Manager:transfer(direction)
+  local h = self:current()
+  if not h then
+    return
+  end
+  require("ssh_launcher.remote").prompt_transfer(h, direction)
+end
+
+--- Remove a host's entry from known_hosts.
+---
+--- The repair for "REMOTE HOST IDENTIFICATION HAS CHANGED" after a server is
+--- legitimately rebuilt. Destructive-by-default in the dialog, because the
+--- other reason that message appears is an attack in progress.
+function Manager:forget_host_key()
+  local h = self:current()
+  if not h then
+    return
+  end
+  dialog.confirm({
+    title = ("%s Forget the recorded key for %s?"):format(theme.icon("warn"), Host.label(h)),
+    lines = {
+      { { "The next connection will accept whatever key the server", theme.hl("Value") } },
+      { { "presents, and record that instead.", theme.hl("Value") } },
+      { { "" } },
+      { { "Only do this if you know why the key changed.", theme.hl("Warn") } },
+    },
+    yes = "Forget it",
+    destructive = true,
+    default_no = true,
+  }, function(confirmed)
+    if not confirmed then
+      return
+    end
+    local ok, msg = keys.forget_host_key(h)
+    if ok then
+      keys.invalidate_known_hosts()
+      self:invalidate_host(h.id)
+      self:refresh()
+      log.info(msg)
+    else
+      log.error(msg)
+    end
+  end)
+end
+
 function Manager:keygen()
   dialog.input({ prompt = "New key path: ", default = "~/.ssh/id_ed25519", completion = "file" }, function(path)
     if not path then
@@ -1236,6 +1419,24 @@ function M.open(opts)
   map(km.keygen, function()
     self:keygen()
   end, "Generate a key")
+  map(km.forget_host_key, function()
+    self:forget_host_key()
+  end, "Forget this host's key")
+  map(km.tunnels, function()
+    self:tunnels()
+  end, "Port forwards")
+  map(km.browse, function()
+    self:browse()
+  end, "Browse remote files")
+  map(km.upload, function()
+    self:transfer("put")
+  end, "Upload a file")
+  map(km.download, function()
+    self:transfer("get")
+  end, "Download a file")
+  map(km.fleet_command, function()
+    self:fleet_command()
+  end, "Run a command on the marked hosts")
 
   map(km.filter, function()
     self:filter_interactive()

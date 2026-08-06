@@ -38,11 +38,51 @@ local function to_file(level, msg)
   end
 end
 
+---@return ssh_launcher.Config|nil
+local function settings()
+  local cfg = package.loaded["ssh_launcher.config"]
+  if cfg and cfg.get then
+    return cfg.get()
+  end
+  return nil
+end
+
+--- Mask targets in user-facing text.
+---
+--- `:messages` is copied into bug reports and shared screens, and a fleet's
+--- internal hostnames are worth as much to an attacker as its topology map.
+--- Enough of each name is kept to tell two hosts apart.
+---@param msg string
+---@return string
+function M.redact(msg)
+  local cfg = settings()
+  if not cfg or not cfg.security.redact_in_logs then
+    return msg
+  end
+
+  local function mask(word)
+    if #word <= 2 then
+      return word:sub(1, 1) .. "…"
+    end
+    return word:sub(1, 1) .. ("…"):rep(1) .. word:sub(-1)
+  end
+
+  -- user@host first, so the host half is not masked twice.
+  msg = msg:gsub("([%w%._%-]+)@([%w%.%-]+)", function(user, host)
+    return mask(user) .. "@" .. mask(host)
+  end)
+  msg = msg:gsub("(%d+)%.(%d+)%.(%d+)%.(%d+)", function(a)
+    return a .. ".x.x.x"
+  end)
+  return msg
+end
+
 ---@param msg string
 ---@param level integer|nil
 ---@param opts table|nil
 function M.notify(msg, level, opts)
   level = level or vim.log.levels.INFO
+  msg = M.redact(msg)
   to_file(level, msg)
   if level < M.level then
     return
@@ -80,16 +120,13 @@ end
 ---@param msg string
 ---@param hl string|nil
 function M.announce(msg, hl)
-  local cfg = package.loaded["ssh_launcher.config"]
-  local enabled = true
-  if cfg and cfg.get then
-    enabled = cfg.get().a11y.announce
-  end
-  if not enabled then
+  local cfg = settings()
+  if cfg and not cfg.a11y.announce then
     return
   end
+  local text = M.redact(msg)
   vim.schedule(function()
-    vim.api.nvim_echo({ { msg, hl or "None" } }, false, {})
+    vim.api.nvim_echo({ { text, hl or "None" } }, false, {})
   end)
 end
 

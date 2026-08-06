@@ -123,6 +123,11 @@ edit them.
                         `~/.ssh/config`.
 :Ssh agent              Inspect and manage ssh-agent identities.
 :Ssh sessions           Jump to a running session.
+:Ssh browse [{name}]    Open a host's files in the editor (oil.nvim or netrw).
+:Ssh tunnels [{name}]   List open tunnels; with a name, raise or drop that
+                        host's port forwards as background processes.
+:Ssh fleet {command}    Run {command} on every host. `--tag=prod` narrows it.
+:Ssh history [{name}]   Show the connection log.
 :Ssh keygen             Generate a new key pair.
 :Ssh reload             Re-read the host database and `~/.ssh/config`.
 :Ssh health             Run `:checkhealth ssh_launcher`.
@@ -162,6 +167,12 @@ Default mappings (all configurable, see |ssh-launcher-config|):
   d <Del>       delete (the marked hosts, or the one under the cursor)
   <Space>       mark / unmark
   M             clear marks
+
+  L             raise or drop this host's port forwards
+  !             run one command on every marked host
+  b             browse the host's files
+  U / W         upload / download a file
+  K             forget this host's key in known_hosts
 
   D             show every problem; 1-9 there applies a single fix
   f             apply every safe fix
@@ -573,6 +584,12 @@ Defaults in full: >lua
         production_tags = { "prod", "production", "live" },
         offer_permission_fix = true,
         redact_in_logs = false,
+      },
+
+      fleet = {
+        concurrency = 8,        -- hosts contacted at once
+        timeout = 60000,        -- ms before a host is abandoned
+        confirm_over = 3,       -- confirm before running on more than this many
       },
 
       history = {

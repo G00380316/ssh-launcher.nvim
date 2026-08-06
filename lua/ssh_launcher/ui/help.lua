@@ -39,6 +39,8 @@ local SPECS = {
           { keys_for("connect_tab"), "Open in a new tab" },
           { keys_for("sessions"), "Jump to a running session" },
           { keys_for("yank_command"), "Copy the resolved ssh command" },
+          { keys_for("tunnels"), "Raise or drop this host's port forwards" },
+          { keys_for("fleet_command"), "Run one command on every marked host" },
         },
       },
       {
@@ -62,7 +64,11 @@ local SPECS = {
           { keys_for("probe"), "Re-check reachability now" },
           { keys_for("agent"), "ssh-agent: list, add, remove keys" },
           { keys_for("copy_id"), "Install your public key on the remote" },
+          { keys_for("browse"), "Browse the host's files in the editor" },
+          { keys_for("upload"), "Send a file to the host" },
+          { keys_for("download"), "Fetch a file from the host" },
           { keys_for("keygen"), "Generate a new key pair" },
+          { keys_for("forget_host_key"), "Forget this host's key in known_hosts" },
         },
       },
       {

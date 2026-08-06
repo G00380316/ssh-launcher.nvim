@@ -64,7 +64,15 @@ forwarding off by default, and never writes key material anywhere.
 - **Keys unlock themselves** — when a host's key needs a passphrase and isn't
   loaded, connecting offers to `ssh-add` it first (starting an agent if there
   isn't one), so you type the passphrase once instead of every time.
-- **ssh-agent, keygen, ssh-copy-id** from inside the manager.
+- **ssh-agent, keygen, ssh-copy-id, known_hosts repair** from the manager.
+- **Background tunnels** — raise a host's port forwards as `ssh -N` processes
+  (`L`), no interactive session parked open. Stopped when Neovim exits.
+- **Fleet commands** — mark hosts, press `!`, run one command across all of
+  them with bounded concurrency and per-host exit status.
+- **Remote files** — `b` browses a host in oil.nvim or netrw; `U`/`W` upload
+  and download.
+- **Connection history** — `:Ssh history` shows every connection, with
+  outcomes and durations.
 - **Production guard** — hosts tagged `prod` confirm before opening.
 - **Connection multiplexing** — opt-in `ControlMaster`; reconnects in
   milliseconds.
@@ -134,8 +142,13 @@ read-only. Press `i` to import them for editing.
 | `:Ssh export [file]` | Write hosts into `~/.ssh/config` |
 | `:Ssh agent` | Manage ssh-agent identities |
 | `:Ssh sessions` | Jump to a running session |
+| `:Ssh browse [name]` | Open a host's files in the editor |
+| `:Ssh tunnels [name]` | List tunnels, or raise/drop a host's forwards |
+| `:Ssh fleet <cmd>` | Run a command on every host (`--tag=prod` narrows it) |
+| `:Ssh history [name]` | Show the connection log |
 | `:Ssh keygen` | Generate a key pair |
 | `:Ssh health` | `:checkhealth ssh_launcher` |
+| `:Ssh doctor` | Diagnose session windows that vanish |
 
 `:SshLauncher`, `:SshAddKey` and `:SshEditKey` from 1.x still work.
 
@@ -143,8 +156,9 @@ read-only. Press `i` to import them for editing.
 
 In the manager: `<CR>` connect · `a` add · `p` paste-add · `e` edit · `d`
 delete · `<Space>` mark · `/` filter · `s` sort · `D` diagnose · `f` fix · `A`
-agent · `C` copy-id · `G` keygen · `i` import · `X` export · `S` sessions ·
-`?` help.
+agent · `C` copy-id · `G` keygen · `K` forget host key · `L` tunnels · `!`
+fleet command · `b` browse · `U`/`W` upload/download · `i` import · `X` export ·
+`S` sessions · `?` help.
 
 In the editor: `<Tab>` next field · `<C-k>` pick a key · `<C-f>` fix
 everything · `<C-d>` explain this line · `gx` show the resolved command ·

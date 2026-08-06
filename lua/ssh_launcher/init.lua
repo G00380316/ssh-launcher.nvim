@@ -47,6 +47,8 @@ function M.setup(opts)
   end
 
   require("ssh_launcher.ui.theme").setup()
+  -- Tunnels are child processes holding local ports; they must not outlive us.
+  require("ssh_launcher.tunnel").setup()
 
   if resolved.commands.enable then
     M._create_commands(resolved)
@@ -301,6 +303,157 @@ function M.health()
   vim.cmd("checkhealth ssh_launcher")
 end
 
+--- Browse a host's files in the editor.
+---@param name string|nil
+---@param path string|nil
+function M.browse(name, path)
+  M.ensure_setup()
+  local remote = require("ssh_launcher.remote")
+  if name then
+    local h = require("ssh_launcher.store").get_by_name(name)
+    if not h then
+      return require("ssh_launcher.log").error(("no host matches %q"):format(name))
+    end
+    return remote.browse(h, path)
+  end
+  require("ssh_launcher.ui.picker").pick(function(h)
+    remote.browse(h, path)
+  end)
+end
+
+--- Raise or drop a host's port forwards in the background.
+---@param name string|nil
+function M.tunnels(name)
+  M.ensure_setup()
+  local store = require("ssh_launcher.store")
+  local tunnel = require("ssh_launcher.tunnel")
+  local log = require("ssh_launcher.log")
+
+  if not name then
+    local open = tunnel.list()
+    if #open == 0 then
+      return log.info("no tunnels are up — press L on a host in the manager to raise its forwards")
+    end
+    local Host = require("ssh_launcher.host")
+    local util = require("ssh_launcher.util")
+    local lines = {}
+    for _, t in ipairs(open) do
+      lines[#lines + 1] = ("%-28s %-26s up %s"):format(
+        Host.label(t.host),
+        tunnel.describe(t.forward),
+        util.ago(t.started_at)
+      )
+    end
+    return require("ssh_launcher.ui.float").text(lines, { title = "Open tunnels", width = 0.7 })
+  end
+
+  local h = store.get_by_name(name)
+  if not h then
+    return log.error(("no host matches %q"):format(name))
+  end
+  if #tunnel.for_host(h.id) > 0 then
+    local closed = tunnel.close_all(h)
+    return log.info(("dropped %d tunnel(s)"):format(closed))
+  end
+  tunnel.open_all(h, function(opened, failures)
+    for _, msg in ipairs(failures) do
+      log.warn(msg)
+    end
+    if opened > 0 then
+      log.info(("raised %d tunnel(s)"):format(opened))
+    end
+  end)
+end
+
+--- Run a command on several hosts at once.
+---@param command string
+---@param opts { hosts: ssh_launcher.Host[]|nil, tag: string|nil }|nil
+function M.fleet(command, opts)
+  M.ensure_setup()
+  opts = opts or {}
+  local log = require("ssh_launcher.log")
+  if require("ssh_launcher.util").blank(command) then
+    return log.error("usage: :Ssh fleet <command>   (runs on hosts matching --tag, or all)")
+  end
+
+  local hosts = opts.hosts
+  if not hosts then
+    hosts = require("ssh_launcher.store").all()
+    if opts.tag then
+      hosts = vim.tbl_filter(function(h)
+        return vim.tbl_contains(h.tags or {}, opts.tag:lower())
+      end, hosts)
+    end
+  end
+  if #hosts == 0 then
+    return log.error("no hosts selected")
+  end
+  return require("ssh_launcher.fleet").run_and_show(hosts, command, opts)
+end
+
+--- Show the connection log.
+---
+--- Every connection has been recorded since the plugin was installed; this is
+--- how you read it back.
+---@param opts { host: string|nil, limit: integer|nil }|nil
+function M.history(opts)
+  M.ensure_setup()
+  opts = opts or {}
+  local history = require("ssh_launcher.history")
+  local util = require("ssh_launcher.util")
+  local log = require("ssh_launcher.log")
+
+  local entries
+  local title
+  if opts.host then
+    local h = require("ssh_launcher.store").get_by_name(opts.host)
+    if not h then
+      return log.error(("no host matches %q"):format(opts.host))
+    end
+    entries = history.for_host(h.id, opts.limit or 200)
+    title = ("History — %s"):format(h.name)
+  else
+    entries = history.recent(opts.limit or 200)
+    title = "Connection history"
+  end
+
+  if #entries == 0 then
+    return log.info("no connections recorded yet")
+  end
+
+  local lines = {}
+  local outcomes = { started = "opened", closed = "closed", failed = "FAILED" }
+  for _, e in ipairs(entries) do
+    local duration = ""
+    if e.duration and e.duration > 0 then
+      duration = e.duration >= 60 and ("%dm%02ds"):format(e.duration / 60, e.duration % 60)
+        or ("%ds"):format(e.duration)
+    end
+    lines[#lines + 1] = ("%s  %-8s %-26s %-30s %s"):format(
+      util.datetime(e.at),
+      outcomes[e.outcome] or e.outcome,
+      util.truncate(e.name or "?", 26),
+      util.truncate(e.target or "", 30),
+      duration
+    )
+  end
+
+  local failures = 0
+  for _, e in ipairs(entries) do
+    if e.outcome == "failed" then
+      failures = failures + 1
+    end
+  end
+  table.insert(lines, 1, "")
+  table.insert(
+    lines,
+    1,
+    ("%d entr%s, %d failure%s"):format(#entries, #entries == 1 and "y" or "ies", failures, failures == 1 and "" or "s")
+  )
+
+  return require("ssh_launcher.ui.float").text(lines, { title = title, width = 0.85, height = 0.8 })
+end
+
 --- Report anything in the running configuration that could interfere with a
 --- session window, and the state of any sessions already open.
 ---
@@ -537,6 +690,43 @@ local SUBCOMMANDS = {
     desc = "Diagnose session windows that open and then vanish",
     run = function()
       M.doctor()
+    end,
+  },
+  browse = {
+    desc = "Browse a host's files in the editor",
+    complete = "host",
+    run = function(args)
+      M.browse(args[1] and table.concat(args, " ") or nil)
+    end,
+  },
+  tunnels = {
+    desc = "List open tunnels, or raise/drop a host's forwards",
+    complete = "host",
+    run = function(args)
+      M.tunnels(args[1] and table.concat(args, " ") or nil)
+    end,
+  },
+  fleet = {
+    desc = "Run a command on every host, or every host with --tag=<tag>",
+    run = function(args)
+      local tag = nil
+      local rest = {}
+      for _, a in ipairs(args) do
+        local value = a:match("^%-%-tag=(.+)$")
+        if value then
+          tag = value
+        else
+          rest[#rest + 1] = a
+        end
+      end
+      M.fleet(table.concat(rest, " "), { tag = tag })
+    end,
+  },
+  history = {
+    desc = "Show the connection log, for one host or all",
+    complete = "host",
+    run = function(args)
+      M.history({ host = args[1] and table.concat(args, " ") or nil })
     end,
   },
   version = {

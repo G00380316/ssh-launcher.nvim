@@ -400,6 +400,46 @@ local function launch(h, opts)
         exit_code = code,
         duration = util.now() - started,
       })
+      -- A changed host key stops ssh dead with a wall of warning text and no
+      -- way forward from inside the session. It is either a reinstalled server
+      -- or an attack, and only the user can tell which — so offer the repair
+      -- and say plainly what accepting it means.
+      if
+        code == 255
+        and not opts.retried
+        and handle
+        and handle.output
+        and handle.output:find("REMOTE HOST IDENTIFICATION HAS CHANGED")
+      then
+        dialog.choose({
+          title = ("%s The host key for %s has changed"):format(theme.icon("error"), Host.label(h)),
+          lines = {
+            { { "The server is presenting a different key from the one recorded", theme.hl("Value") } },
+            { { "in known_hosts. That happens when a server is rebuilt — and it", theme.hl("Value") } },
+            { { "is also exactly what a machine-in-the-middle looks like.", theme.hl("Value") } },
+            { { "" } },
+            { { "Only continue if you know why it changed.", theme.hl("Warn") } },
+          },
+          choices = {
+            { label = "Forget the old key and reconnect", value = "forget", key = "f", destructive = true },
+            { label = "Cancel", value = nil, key = "c" },
+          },
+          default = 2,
+          on_choice = function(value)
+            if value ~= "forget" then
+              return
+            end
+            local ok, msg = require("ssh_launcher.keys").forget_host_key(h)
+            if not ok then
+              return log.error(msg)
+            end
+            log.info(msg)
+            M.connect(h, vim.tbl_extend("force", opts, { retried = true, new = true }))
+          end,
+        })
+        return
+      end
+
       -- 255 is ssh's catch-all for "could not connect", and by far the most
       -- common cause is a key the agent never offered. Rather than leaving the
       -- user to work that out, check and offer the fix.
