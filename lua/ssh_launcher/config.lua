@@ -111,6 +111,36 @@ M.defaults = {
   },
 
   ---------------------------------------------------------------------------
+  -- Remote files
+  ---------------------------------------------------------------------------
+  remote = {
+    --- "builtin" gives every host an SSH-backed browser and writable text
+    --- buffers. "oil" and "netrw" keep their native URL adapters available;
+    --- "auto" prefers those integrations when installed.
+    adapter = "builtin",
+    --- Network operations are deliberately bounded: a dead host must not
+    --- leave an editor buffer stuck in a loading or writing state forever.
+    timeout = 30000,
+  },
+
+  ---------------------------------------------------------------------------
+  -- Configured Neovim on the server
+  ---------------------------------------------------------------------------
+  workspace = {
+    --- Local configuration copied into a private, temporary remote directory.
+    config_dir = vim.fn.stdpath("config"),
+    --- Persistent remote plugin data/cache lives here; the copied config is
+    --- session-scoped and removed as soon as remote Neovim exits.
+    remote_root = "~/.cache/ssh-launcher.nvim",
+    binary = "nvim",
+    args = { "." },
+    excludes = { ".git", ".DS_Store", "*.swp", "*.tmp" },
+    strategy = "tab",
+    confirm = true,
+    bundle_timeout = 30000,
+  },
+
+  ---------------------------------------------------------------------------
   -- UI
   ---------------------------------------------------------------------------
   ui = {
@@ -269,6 +299,7 @@ M.defaults = {
     forget_host_key = "K",
     tunnels = "L",
     browse = "b",
+    workspace = "n",
     upload = "U",
     download = "W",
     fleet_command = "!",
@@ -302,6 +333,8 @@ local enums = {
   ["ssh.auto_add_keys"] = { "prompt", "always", "never" },
   ["terminal.protect"] = { "auto", true, false },
   ["terminal.strategy"] = { "tab", "float", "vsplit", "split", "current", "tmux" },
+  ["remote.adapter"] = { "builtin", "oil", "netrw", "auto" },
+  ["workspace.strategy"] = { "tab", "float", "vsplit", "split", "current", "tmux" },
   ["ui.sort"] = { "frecency", "name", "recent", "host", "manual" },
   ["ui.picker"] = { "manager", "telescope", "fzf-lua", "snacks", "select", "auto" },
   ["diagnostics.on_connect"] = { "off", "warn", "block" },
@@ -364,6 +397,8 @@ local function validate(opts)
     ["diagnostics.probe_timeout"] = { 100, 60000 },
     ["fleet.concurrency"] = { 1, 64 },
     ["fleet.timeout"] = { 1000, 600000 },
+    ["remote.timeout"] = { 1000, 600000 },
+    ["workspace.bundle_timeout"] = { 1000, 600000 },
   }
   for path, range in pairs(numbers) do
     local value = get_path(opts, path)
@@ -389,6 +424,23 @@ local function validate(opts)
     opts.ssh.extra_args = {}
   end
 
+  for _, field in ipairs({ "args", "excludes" }) do
+    if type(opts.workspace[field]) ~= "table" then
+      problems[#problems + 1] = ("workspace.%s must be a list of strings (using default)"):format(field)
+      opts.workspace[field] = vim.deepcopy(M.defaults.workspace[field])
+    end
+  end
+  for _, field in ipairs({ "config_dir", "remote_root", "binary" }) do
+    if util.blank(opts.workspace[field]) then
+      problems[#problems + 1] = ("workspace.%s must not be empty (using default)"):format(field)
+      opts.workspace[field] = M.defaults.workspace[field]
+    end
+  end
+  if type(opts.workspace.confirm) ~= "boolean" then
+    problems[#problems + 1] = "workspace.confirm must be true or false (using default)"
+    opts.workspace.confirm = M.defaults.workspace.confirm
+  end
+
   if opts.ui.icons == false then
     opts.a11y.ascii = true
   end
@@ -410,6 +462,8 @@ function M.setup(user)
     "ui.columns",
     "diagnostics.disabled",
     "store.extra_sources",
+    "workspace.args",
+    "workspace.excludes",
   }
   for _, path in ipairs(replace_lists) do
     local provided = user and get_path(user, path)

@@ -43,8 +43,10 @@ Design commitments:
 - Host-key verification is never silently disabled. `StrictHostKeyChecking=no`
   is rejected in configuration and reported as an error on any host that sets
   it.
-- Key material is never read, stored, copied or logged. The plugin stores paths
-  and metadata; passphrases live in your agent, where they belong.
+- Outside the explicit configured-workspace action, key material is never read,
+  stored, copied or logged. The plugin stores paths and metadata; passphrases
+  live in your agent, where they belong. Workspace launches clearly confirm
+  before copying the selected Neovim configuration directory to a host.
 - Everything the interface shows is real buffer text. Colour and glyphs are
   decoration on top of information that is already readable without them.
 
@@ -61,6 +63,7 @@ Optional~
   - `ssh-copy-id`  installing your public key on a remote host
   - A Nerd Font    prettier glyphs; ASCII is used automatically without one
   - telescope.nvim, fzf-lua or snacks.nvim as an alternative picker
+  - Configured workspaces: local `tar` and `scp`; remote `nvim` and `tar`
 
 Run `:checkhealth ssh_launcher` to see what is present on your machine.
 
@@ -123,7 +126,12 @@ edit them.
                         `~/.ssh/config`.
 :Ssh agent              Inspect and manage ssh-agent identities.
 :Ssh sessions           Jump to a running session.
-:Ssh browse [{name}]    Open a host's files in the editor (oil.nvim or netrw).
+:Ssh browse [{name} [{path}]]
+                        Browse and edit a host's files over SSH. {path} defaults
+                        to the host's Remote dir, then its home directory.
+:Ssh workspace [{name} [{path}]]
+                        Copy this Neovim configuration into an isolated remote
+                        session and launch Neovim on the server.
 :Ssh tunnels [{name}]   List open tunnels; with a name, raise or drop that
                         host's port forwards as background processes.
 :Ssh fleet {command}    Run {command} on every host. `--tag=prod` narrows it.
@@ -171,6 +179,7 @@ Default mappings (all configurable, see |ssh-launcher-config|):
   L             raise or drop this host's port forwards
   !             run one command on every marked host
   b             browse the host's files
+  n             launch remote Neovim with this configuration
   U / W         upload / download a file
   K             forget this host's key in known_hosts
 
@@ -192,6 +201,50 @@ Default mappings (all configurable, see |ssh-launcher-config|):
 
 Marks make bulk work practical: mark ten hosts with `<Space>`, then `f` to
 repair them all or `X` to export just those.
+
+Remote workspace                                      *ssh-launcher-remote-files*
+Press `b` on a host, or use `:Ssh browse {name} {path}`. The built-in browser
+uses that saved host's port, identity, ProxyJump, host-key policy and ssh
+options; it does not depend on those details also existing in ssh_config.
+
+  <CR> l e      open a directory or text file
+  h -           parent directory
+  r R           refresh
+  <C-x>         open in a horizontal split
+  <C-v>         open in a vertical split
+  <C-t>         open in a new tab
+  q             close the browser
+
+An opened file is a normal listed Neovim buffer: motions, undo, completion and
+filetype detection work as usual. `:write` writes the current contents
+back to the server. Existing files are replaced through a same-directory
+temporary file so an interrupted connection does not leave a truncated file;
+permissions are preserved. Binary files are refused by the text editor and can
+still be moved explicitly with `U` / `W`.
+
+Remote operations are non-interactive so a background job can never hide a
+password prompt. If a configured private key is locked, the browser offers to
+load it into ssh-agent first. Oil and netrw users can opt back into their URL
+adapters with `remote.adapter`.
+
+Configured remote Neovim                         *ssh-launcher-remote-neovim*
+Press `n` on a host, or run `:Ssh workspace {name} {path}`. The plugin packages
+the configuration directory used by the current Neovim, transfers it with scp,
+and starts `nvim .` on the server in the requested directory. This is a real
+remote Neovim process: its plugins, LSP servers, Git commands, searches,
+terminals and shell commands all execute on the server.
+
+The copied configuration lives in a private, per-session directory and is
+deleted when remote Neovim exits or the SSH connection closes. Plugin data,
+state and caches persist below `workspace.remote_root`, isolated from the
+server account's normal Neovim installation, so later launches do not need to
+install every plugin again. The user's normal remote `~/.config/nvim` is never
+read or overwritten.
+
+The first launch to each host during a local Neovim session asks before copying
+the config. Review local config for embedded tokens or credentials before
+sending it to a server; environment-managed secrets are not copied. On a
+production-tagged host, confirmation is required every time.
 
 ==============================================================================
 7. THE EDITOR                                                *ssh-launcher-editor*
@@ -529,6 +582,22 @@ Defaults in full: >lua
         float = { width = 0.9, height = 0.85, border = "rounded" },
       },
 
+      remote = {
+        adapter = "builtin", -- builtin | oil | netrw | auto
+        timeout = 30000,      -- ms for list, read and write operations
+      },
+
+      workspace = {
+        config_dir = vim.fn.stdpath("config"),
+        remote_root = "~/.cache/ssh-launcher.nvim",
+        binary = "nvim",
+        args = { "." },
+        excludes = { ".git", ".DS_Store", "*.swp", "*.tmp" },
+        strategy = "tab",
+        confirm = true,
+        bundle_timeout = 30000,
+      },
+
       ui = {
         border = "rounded",
         width = 0.82,
@@ -636,6 +705,8 @@ source, so a repository can ship its own staging hosts. Use the same format as
     ssh.export({ path = path, dry_run = false })
     ssh.agent()
     ssh.sessions()
+    ssh.browse(name, path)     -- pick a host when name is nil
+    ssh.workspace(name, path)  -- configured Neovim running on the host
     ssh.hosts()                 -- the host list, for scripting
     ssh.save(spec)              -- add a host from a table or a string
     ssh.health()

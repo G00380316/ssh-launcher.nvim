@@ -12,7 +12,7 @@
 
 local M = {}
 
-M.version = "2.0.0"
+M.version = "2.1.0"
 
 local MIN_NVIM = "nvim-0.10"
 
@@ -321,6 +321,25 @@ function M.browse(name, path)
   end)
 end
 
+--- Launch Neovim on a host with a temporary copy of this instance's config.
+---@param name string|nil
+---@param path string|nil
+---@param opts table|nil
+function M.workspace(name, path, opts)
+  M.ensure_setup()
+  local workspace = require("ssh_launcher.workspace")
+  if name then
+    local h = require("ssh_launcher.store").get_by_name(name)
+    if not h then
+      return require("ssh_launcher.log").error(("no host matches %q"):format(name))
+    end
+    return workspace.open(h, path, opts)
+  end
+  require("ssh_launcher.ui.picker").pick(function(h)
+    workspace.open(h, path, opts)
+  end)
+end
+
 --- Raise or drop a host's port forwards in the background.
 ---@param name string|nil
 function M.tunnels(name)
@@ -572,6 +591,24 @@ end
 -- Commands
 --------------------------------------------------------------------------------
 
+---@param args string[]
+---@return string|nil name, string|nil path
+local function host_and_path(args)
+  if #args == 0 then
+    return nil, nil
+  end
+  local store = require("ssh_launcher.store")
+  -- Host labels may contain spaces, and so may remote paths. Resolve the
+  -- longest saved-host prefix, then treat everything after it as the path.
+  for i = #args, 1, -1 do
+    local name = table.concat(args, " ", 1, i)
+    if store.get_by_name(name) then
+      return name, i < #args and table.concat(args, " ", i + 1) or nil
+    end
+  end
+  return table.concat(args, " "), nil
+end
+
 ---@type table<string, { run: fun(args: string[], bang: boolean), desc: string, complete: string|nil }>
 local SUBCOMMANDS = {
   open = {
@@ -696,7 +733,16 @@ local SUBCOMMANDS = {
     desc = "Browse a host's files in the editor",
     complete = "host",
     run = function(args)
-      M.browse(args[1] and table.concat(args, " ") or nil)
+      local name, path = host_and_path(args)
+      M.browse(name, path)
+    end,
+  },
+  workspace = {
+    desc = "Launch Neovim on a host with this configuration",
+    complete = "host",
+    run = function(args)
+      local name, path = host_and_path(args)
+      M.workspace(name, path)
     end,
   },
   tunnels = {

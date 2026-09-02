@@ -102,6 +102,7 @@ test("every module loads", function()
     "tunnel",
     "fleet",
     "remote",
+    "workspace",
     "ui.theme",
     "ui.float",
     "ui.render",
@@ -110,6 +111,7 @@ test("every module loads", function()
     "ui.help",
     "ui.manager",
     "ui.picker",
+    "ui.remote",
   }) do
     local ok, err = pcall(require, "ssh_launcher." .. name)
     truthy(ok, ("require ssh_launcher.%s failed: %s"):format(name, err))
@@ -343,8 +345,14 @@ suite("config")
 --------------------------------------------------------------------------------
 
 test("rejects invalid enums and clamps numbers", function()
-  local cfg = require("ssh_launcher.config").setup({ terminal = { strategy = "nope" }, ui = { width = 99 } })
+  local cfg = require("ssh_launcher.config").setup({
+    terminal = { strategy = "nope" },
+    workspace = { strategy = "nowhere", bundle_timeout = 0 },
+    ui = { width = 99 },
+  })
   eq(cfg.terminal.strategy, "tab")
+  eq(cfg.workspace.strategy, "tab")
+  eq(cfg.workspace.bundle_timeout, 1000)
   eq(cfg.ui.width, 1.0)
 end)
 
@@ -1382,6 +1390,201 @@ test("scp transfers pass paths as separate arguments", function()
   eq(down[#down], "/local/x", "get sends the local path last")
 end)
 
+test("remote commands use the saved SSH configuration without session side effects", function()
+  local remote = require("ssh_launcher.remote")
+  local h = Host.normalize({
+    name = "workspace",
+    host = "10.0.0.9",
+    user = "me",
+    port = 2222,
+    identity_file = "/tmp/key",
+    proxy_jump = "bastion",
+    remote_dir = "/old",
+    remote_command = "do-not-run",
+    forwards = "L 8080:localhost:80",
+    forward_agent = true,
+  })
+  local argv = remote.command_argv(h, "printf hello")
+  eq(argv[#argv], "printf hello")
+  truthy(vim.tbl_contains(argv, "2222"), "port")
+  truthy(vim.tbl_contains(argv, "/tmp/key"), "identity")
+  truthy(vim.tbl_contains(argv, "bastion"), "jump host")
+  truthy(vim.tbl_contains(argv, "BatchMode=yes"), "background file operations must not hang on a prompt")
+  falsy(vim.tbl_contains(argv, "do-not-run"), "the session's remote command leaked into a file operation")
+  falsy(vim.tbl_contains(argv, "-L"), "session forwards leaked into a file operation")
+  falsy(vim.tbl_contains(argv, "-A"), "agent forwarding leaked into a file operation")
+  falsy(vim.tbl_contains(argv, "-t"), "file operations must not allocate a TTY")
+end)
+
+test("the built-in browser preserves unusual filenames and blocks path injection", function()
+  local remote = require("ssh_launcher.remote")
+  eq(remote.shell_quote("a'b; touch /tmp/nope"), [['a'\''b; touch /tmp/nope']])
+
+  local dir = TMP .. "/remote-list; still-data"
+  vim.fn.mkdir(dir .. "/z-dir", "p")
+  vim.fn.writefile({ "x" }, dir .. "/a file.txt")
+  vim.fn.writefile({ "x" }, dir .. "/.hidden")
+  local res = util.system_sync({ "sh", "-c", remote.list_command(dir) }, 2000)
+  truthy(res.ok, res.stderr)
+  local resolved, entries, err = remote.parse_listing(res.stdout)
+  eq(err, nil)
+  eq(resolved, vim.uv.fs_realpath(dir))
+  eq(entries[1], { name = "z-dir", type = "directory" }, "directories sort first")
+  eq(entries[2], { name = ".hidden", type = "file" })
+  eq(entries[3], { name = "a file.txt", type = "file" })
+
+  local _, _, truncated = remote.parse_listing("/srv\0f\0missing-terminator")
+  contains(truncated, "truncated")
+end)
+
+test("remote text buffers preserve line endings when written", function()
+  local ui = require("ssh_launcher.ui.remote")
+  local lines, format, eol = ui.decode("one\r\ntwo\r\n")
+  eq(lines, { "one", "two" })
+  eq(format, "dos")
+  eq(eol, true)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].fileformat = format
+  vim.bo[buf].endofline = eol
+  eq(ui.encode(buf), "one\r\ntwo\r\n")
+  vim.api.nvim_buf_delete(buf, { force = true })
+
+  local _, _, _, err = ui.decode("text\0binary")
+  contains(err, "binary")
+end)
+
+test("a remote file opens as an editable buffer and write sends it back", function()
+  local runner = TMP .. "/fake-remote-ssh"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    'for arg in "$@"; do command="$arg"; done',
+    'exec sh -c "$command"',
+  }, runner)
+  vim.uv.fs_chmod(runner, tonumber("755", 8))
+  configure({ ssh = { binary = runner }, remote = { adapter = "builtin", timeout = 2000 } })
+
+  local path = TMP .. "/remote-edit.txt"
+  vim.fn.writefile({ "before" }, path)
+  reset_store()
+  local h = store.add({ name = "fake remote", host = "example.invalid", user = "me" })
+  local ui = require("ssh_launcher.ui.remote")
+  vim.cmd("Ssh browse fake remote " .. TMP)
+  local browser = vim.api.nvim_get_current_buf()
+  vim.wait(2000, function()
+    return vim.api.nvim_buf_is_valid(browser)
+      and table.concat(vim.api.nvim_buf_get_lines(browser, 0, -1, false), "\n"):find("remote%-edit.txt") ~= nil
+  end)
+  contains(vim.api.nvim_buf_get_lines(browser, 0, -1, false), "[f]  remote-edit.txt")
+
+  local buf = ui.edit(h, path)
+  vim.wait(2000, function()
+    return vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].buftype == "acwrite"
+  end)
+  eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), { "before" })
+
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "after", "two" })
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd("write")
+  end)
+  vim.wait(2000, function()
+    return table.concat(vim.fn.readfile(path), "\n") == "after\ntwo" and not vim.bo[buf].modified
+  end)
+  eq(vim.fn.readfile(path), { "after", "two" })
+  falsy(vim.bo[buf].modified, "a completed remote write should clear the modified flag")
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.api.nvim_buf_delete(browser, { force = true })
+  configure()
+end)
+
+test("remote Neovim gets an isolated temporary config and persistent plugin data", function()
+  local workspace = require("ssh_launcher.workspace")
+  local command = workspace.launch_command({
+    token = "safe-token",
+    archive = "/tmp/config archive.tar.gz",
+    path = "/srv/app with spaces",
+    remote_root = "~/.cache/ssh launcher",
+    binary = "nvim",
+    args = { ".", "+checkhealth" },
+  })
+  contains(command, 'XDG_CONFIG_HOME="$session/config"')
+  contains(command, 'XDG_DATA_HOME="$root/data"')
+  contains(command, 'session="$root/sessions/session-safe-token"')
+  contains(command, "workdir='/srv/app with spaces'")
+  contains(command, "'nvim' '.' '+checkhealth'")
+  contains(command, "trap cleanup 0")
+
+  local h = Host.normalize({ id = "server", name = "Server", host = "server.example", remote_dir = "/old" })
+  local session = workspace.session_host(h, command, "safe-token")
+  eq(session.source, "workspace")
+  eq(session.remote_dir, nil)
+  eq(session.remote_command, command)
+  eq(session.request_tty, true)
+  contains(session.name, "Neovim")
+end)
+
+test("the local Neovim config bundle follows symlinks and excludes noise", function()
+  if not util.has_executable("tar") then
+    return
+  end
+  local workspace = require("ssh_launcher.workspace")
+  local config_dir = TMP .. "/nvim-config"
+  local linked = TMP .. "/linked-config.lua"
+  local archive = TMP .. "/nvim-config.tar.gz"
+  vim.fn.mkdir(config_dir, "p")
+  vim.fn.writefile({ "return {}" }, linked)
+  vim.uv.fs_symlink(linked, config_dir .. "/init.lua")
+  vim.fn.writefile({ "ignore" }, config_dir .. "/scratch.tmp")
+
+  local packed = util.system_sync(workspace.bundle_argv(config_dir, archive, { "*.tmp" }), 5000)
+  truthy(packed.ok, packed.stderr)
+  local listed = util.system_sync({ "tar", "-tzf", archive }, 5000)
+  truthy(listed.ok, listed.stderr)
+  contains(listed.stdout, "./init.lua")
+  falsy(listed.stdout:find("scratch.tmp", 1, true), "excluded files must not be sent")
+end)
+
+test("the remote bootstrap loads the copied config and removes it on exit", function()
+  if not util.has_executable("tar") then
+    return
+  end
+  local workspace = require("ssh_launcher.workspace")
+  local config_dir = TMP .. "/bootstrap-config"
+  local workdir = TMP .. "/bootstrap-project"
+  local root = TMP .. "/bootstrap-root"
+  local archive = TMP .. "/bootstrap-config.tar.gz"
+  local fake_nvim = TMP .. "/remote-nvim"
+  vim.fn.mkdir(config_dir, "p")
+  vim.fn.mkdir(workdir, "p")
+  vim.fn.writefile({ "return true" }, config_dir .. "/init.lua")
+  vim.fn.writefile({
+    "#!/bin/sh",
+    'test -f "$XDG_CONFIG_HOME/nvim/init.lua" || exit 9',
+    'printf "config=%s\\ndata=%s\\ncwd=%s\\n" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$PWD"',
+  }, fake_nvim)
+  vim.uv.fs_chmod(fake_nvim, tonumber("755", 8))
+
+  local packed = util.system_sync(workspace.bundle_argv(config_dir, archive), 5000)
+  truthy(packed.ok, packed.stderr)
+  local command = workspace.launch_command({
+    token = "bootstrap",
+    archive = archive,
+    path = workdir,
+    remote_root = root,
+    binary = fake_nvim,
+    args = { "." },
+  })
+  local launched = util.system_sync({ "sh", "-c", command }, 5000)
+  truthy(launched.ok, launched.stderr)
+  contains(launched.stdout, "config=" .. root .. "/sessions/session-bootstrap/config")
+  contains(launched.stdout, "data=" .. root .. "/data")
+  contains(launched.stdout, "cwd=" .. vim.uv.fs_realpath(workdir))
+  eq(vim.fn.glob(root .. "/sessions/*"), "", "the copied config should be removed")
+  truthy(util.is_dir(root .. "/data"), "plugin data should persist")
+  falsy(util.exists(archive), "the uploaded archive should be removed")
+end)
+
 --------------------------------------------------------------------------------
 suite("end to end")
 --------------------------------------------------------------------------------
@@ -1432,6 +1635,7 @@ test("commands and completion work through the user-command layer", function()
 
   local ssh = require("ssh_launcher")
   truthy(#ssh._complete("", "Ssh ") > 5, "subcommand completion")
+  truthy(vim.tbl_contains(ssh._subcommands(), "workspace"), "workspace subcommand")
   truthy(vim.tbl_contains(ssh._complete("", "Ssh connect "), "deploy@web-01.example.com"), "host-name completion")
 
   vim.cmd("Ssh list")

@@ -1162,6 +1162,16 @@ function Manager:browse()
   require("ssh_launcher.remote").browse(h)
 end
 
+--- Copy this Neovim configuration to the host and launch it there.
+function Manager:workspace()
+  local h = self:current()
+  if not h then
+    return
+  end
+  self.win:close()
+  require("ssh_launcher.workspace").open(h)
+end
+
 ---@param direction "get"|"put"
 function Manager:transfer(direction)
   local h = self:current()
@@ -1428,6 +1438,9 @@ function M.open(opts)
   map(km.browse, function()
     self:browse()
   end, "Browse remote files")
+  map(km.workspace, function()
+    self:workspace()
+  end, "Launch configured remote Neovim")
   map(km.upload, function()
     self:transfer("put")
   end, "Upload a file")

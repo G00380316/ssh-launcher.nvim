@@ -30,9 +30,11 @@ local function check_binaries()
 
   local required = { "ssh" }
   local optional = {
+    ["scp"] = "copying files and Neovim configuration to a host",
     ["ssh-add"] = "loading passphrase-protected keys into the agent",
     ["ssh-keygen"] = "key inspection, fingerprints and known_hosts repair",
     ["ssh-copy-id"] = "installing your public key on a remote host",
+    ["tar"] = "packaging this Neovim configuration for a remote workspace",
   }
 
   for _, bin in ipairs(required) do
@@ -237,6 +239,8 @@ local function check_config()
   end
 
   info(("terminal strategy: %s"):format(cfg.terminal.strategy))
+  info(("remote file adapter: %s"):format(require("ssh_launcher.remote").adapter() or "unavailable"))
+  info(("remote Neovim strategy: %s"):format(cfg.workspace.strategy))
   info(("picker: %s"):format(cfg.ui.picker))
   info(("diagnostics on connect: %s"):format(cfg.diagnostics.on_connect))
 end

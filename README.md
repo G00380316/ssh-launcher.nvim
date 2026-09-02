@@ -69,8 +69,14 @@ forwarding off by default, and never writes key material anywhere.
   (`L`), no interactive session parked open. Stopped when Neovim exits.
 - **Fleet commands** — mark hosts, press `!`, run one command across all of
   them with bounded concurrency and per-host exit status.
-- **Remote files** — `b` browses a host in oil.nvim or netrw; `U`/`W` upload
-  and download.
+- **Remote workspace** — `b` opens a built-in SSH file browser using the saved
+  port, key, jump host and options. Open a text file, edit normally, and `:write`
+  saves it back atomically. oil.nvim/netrw remain optional adapters; `U`/`W`
+  handle explicit uploads and downloads.
+- **Your Neovim on the server** — `n` packages the configuration used by the
+  current Neovim, sends it to a private session directory, and launches remote
+  Neovim there. Plugins, LSPs, Git, searches and terminals then run entirely in
+  the SSH environment; the copied config is removed when the session exits.
 - **Connection history** — `:Ssh history` shows every connection, with
   outcomes and durations.
 - **Production guard** — hosts tagged `prod` confirm before opening.
@@ -84,9 +90,11 @@ forwarding off by default, and never writes key material anywhere.
 
 ## Requirements
 
-Neovim **0.10+** and the OpenSSH client. `ssh-add`, `ssh-keygen` and
-`ssh-copy-id` unlock the agent, key-inspection and key-distribution features.
-A Nerd Font is optional — ASCII glyphs are used automatically without one.
+Neovim **0.10+** and the OpenSSH client. Configured remote workspaces also need
+`tar` and `scp` locally, plus `nvim` and `tar` on the server. `ssh-add`,
+`ssh-keygen` and `ssh-copy-id` unlock the agent, key-inspection and
+key-distribution features. A Nerd Font is optional — ASCII glyphs are used
+automatically without one.
 
 ## Installation
 
@@ -142,7 +150,8 @@ read-only. Press `i` to import them for editing.
 | `:Ssh export [file]` | Write hosts into `~/.ssh/config` |
 | `:Ssh agent` | Manage ssh-agent identities |
 | `:Ssh sessions` | Jump to a running session |
-| `:Ssh browse [name]` | Open a host's files in the editor |
+| `:Ssh browse [name] [path]` | Browse and edit a host's files in the editor |
+| `:Ssh workspace [name] [path]` | Launch remote Neovim with your local configuration |
 | `:Ssh tunnels [name]` | List tunnels, or raise/drop a host's forwards |
 | `:Ssh fleet <cmd>` | Run a command on every host (`--tag=prod` narrows it) |
 | `:Ssh history [name]` | Show the connection log |
@@ -157,12 +166,16 @@ read-only. Press `i` to import them for editing.
 In the manager: `<CR>` connect · `a` add · `p` paste-add · `e` edit · `d`
 delete · `<Space>` mark · `/` filter · `s` sort · `D` diagnose · `f` fix · `A`
 agent · `C` copy-id · `G` keygen · `K` forget host key · `L` tunnels · `!`
-fleet command · `b` browse · `U`/`W` upload/download · `i` import · `X` export ·
-`S` sessions · `?` help.
+fleet command · `b` browse · `n` configured remote Neovim · `U`/`W`
+upload/download · `i` import · `X` export · `S` sessions · `?` help.
 
 In the editor: `<Tab>` next field · `<C-k>` pick a key · `<C-f>` fix
 everything · `<C-d>` explain this line · `gx` show the resolved command ·
 `<C-s>` save · `<C-a>` save and connect.
+
+In the remote browser: `<CR>`/`l` open · `h`/`-` parent · `r` refresh ·
+`<C-x>`/`<C-v>`/`<C-t>` open in a split/vsplit/tab · `q` close. Remote text
+files are regular Neovim buffers; use `:write` to save them to the server.
 
 Every key is configurable. `?` shows the current bindings, not the defaults.
 
@@ -179,6 +192,17 @@ require("ssh_launcher").setup({
   },
   terminal = {
     strategy = "float",                       -- tab | float | vsplit | split | tmux
+  },
+  remote = {
+    adapter = "builtin",                      -- builtin | oil | netrw | auto
+    timeout = 30000,
+  },
+  workspace = {
+    config_dir = vim.fn.stdpath("config"),
+    remote_root = "~/.cache/ssh-launcher.nvim",
+    binary = "nvim",
+    args = { "." },
+    strategy = "tab",
   },
   ui = {
     picker = "manager",                       -- or telescope | fzf-lua | snacks
@@ -205,6 +229,8 @@ require("ssh_launcher").setup({
 - **No secrets stored.** Pasted passwords are discarded, pasted private keys
   refused, credential-shaped fields reported as errors. The database is written
   atomically at mode 0600 and loose permissions are tightened on sight.
+- **Config sync is explicit.** A workspace confirms before copying the chosen
+  Neovim config, keeps it private, and removes it when remote Neovim exits.
 - **Agent forwarding is opt-in** and warned about; `ProxyJump` is suggested
   instead.
 - **`IdentitiesOnly=yes`** whenever a host names a key, so a large agent cannot
