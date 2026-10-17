@@ -10,6 +10,10 @@
 --- for a passphrase, a locked key is unlocked when the window opens — the same
 --- rule as the remote file browser.
 ---
+--- Which way a copy goes is always on screen: the active pane is titled FROM
+--- and the other TO, and the line under them spells out what `c` would do —
+--- "Upload a.txt  ~/proj -> box:/srv/app" — before it is pressed.
+---
 --- Everything on screen is buffer text: `[x]` marks a selection, a leading
 --- arrow marks the active pane. Colour only adds emphasis.
 
@@ -161,6 +165,19 @@ function Pane:label()
   return self.side == "local" and "Local" or Host.label(self.c.host)
 end
 
+--- This pane's directory, named by its machine: `Local:~/proj`,
+--- `box:/srv/app`.
+---@param max integer cells for the path
+---@return string
+function Pane:place(max)
+  return ("%s:%s"):format(self:label(), tail(self.path, max))
+end
+
+---@return ssh_launcher.Pane
+function Pane:other()
+  return self.c.left == self and self.c.right or self.c.left
+end
+
 ---@return table[]
 function Pane:visible()
   if not self.hide_dot then
@@ -256,10 +273,21 @@ function Pane:update_chrome()
   end
   local width = vim.api.nvim_win_get_width(self.float.win)
   local active = self.c.active == self
-  local marker = active and (theme.icon("arrow") .. " ") or "  "
+  -- `c` copies out of the active pane into the other, so say so on each.
+  local marker = active and (theme.icon("arrow") .. " FROM ") or "  TO "
   local label = self:label()
-  local room = math.max(8, width - util.width(marker) - util.width(label) - 6)
-  local title = ("%s%s  %s"):format(marker, label, tail(self.path, room))
+  local room = math.max(8, width - util.width(marker) - util.width(label) - 8)
+  local title = ("%s%s · %s"):format(marker, label, tail(self.path, room))
+
+  -- The active pane's frame stands out; the other recedes.
+  local base = self.base_winhighlight or vim.wo[self.float.win].winhighlight
+  self.base_winhighlight = base
+  local emphasis = active and theme.hl("Key") or theme.hl("Muted")
+  vim.wo[self.float.win].winhighlight = table.concat({
+    base,
+    "FloatBorder:" .. emphasis,
+    "FloatTitle:" .. (active and theme.hl("Title") or theme.hl("Muted")),
+  }, ",")
 
   local parts = { ("%d item%s"):format(#self:visible(), #self:visible() == 1 and "" or "s") }
   local count, bytes = self:selection()
@@ -274,6 +302,10 @@ function Pane:update_chrome()
   self.float.opts.title, self.float.opts.footer = title, footer
   self.float:set_title(title)
   self.float:set_footer(footer)
+  -- What `c` would copy depends on the selection and the cursor.
+  if active then
+    self.c:draw_status()
+  end
 end
 
 ---@param focus string|nil put the cursor on this entry
@@ -563,13 +595,13 @@ local function layout()
   end
 
   local left_outer = math.floor(total_w / 2)
-  local inner_h = total_h - 3 -- two border rows, one status line
+  local inner_h = total_h - 4 -- two border rows, two status lines
   local row = math.max(0, math.floor((rows - total_h) / 2))
   local col = math.max(0, math.floor((columns - total_w) / 2))
   return {
     left = { row = row, col = col, width = left_outer - 2, height = inner_h },
     right = { row = row, col = col + left_outer, width = total_w - left_outer - 2, height = inner_h },
-    status = { row = row + inner_h + 2, col = col, width = total_w, height = 1 },
+    status = { row = row + inner_h + 2, col = col, width = total_w, height = 2 },
   }
 end
 
@@ -630,45 +662,98 @@ function Commander:flash(text, kind)
   end, 8000)
 end
 
+--- What `c` would do right now, as the first status line: what is being
+--- copied, from where, to where.
+---@param width integer
+---@return ssh_launcher.Line
+function Commander:route(width)
+  local source = self.active
+  local dest = source:other()
+  local copy_key = first_key("copy")
+  if dest.error and #dest.listing == 0 then
+    return { { " the other pane has no directory to copy into", theme.hl("Warn") } }
+  end
+
+  local items, from_selection = source:targets()
+  local to = dest:place(math.max(12, math.floor(width * 0.4)))
+  local arrow = " " .. theme.icon("arrow") .. " "
+  if #items == 0 then
+    return {
+      { " ", nil },
+      { copy_key, theme.hl("KeyHint") },
+      { " copies to ", theme.hl("Muted") },
+      { to, theme.hl("Target") },
+      { ("   move onto a file, or %s to select"):format(first_key("toggle")), theme.hl("Muted") },
+    }
+  end
+
+  local verb = source.side == "local" and "Upload " or "Download "
+  local what
+  if from_selection then
+    local count, bytes = source:selection()
+    what = ("%d selected%s"):format(count, bytes > 0 and (" (" .. util.human_size(bytes) .. ")") or "")
+  else
+    what = items[1].name .. (items[1].type == "directory" and "/" or "")
+  end
+  local fixed = 1 + util.width(copy_key) + 1 + #verb + util.width(arrow) + util.width(to) + 2
+  what = util.truncate(util.single_line(what), math.max(8, math.min(40, width - fixed - 12)))
+  local from_room = width - fixed - util.width(what)
+  local chunks = {
+    { " ", nil },
+    { copy_key, theme.hl("KeyHint") },
+    { " " .. verb, theme.hl("Key") },
+    { what, theme.hl("Name") },
+  }
+  -- Where it comes from matters less than where it goes: drop it first.
+  if from_room >= 10 then
+    chunks[#chunks + 1] = { "  " .. source:place(from_room - 2), theme.hl("Muted") }
+  end
+  chunks[#chunks + 1] = { arrow, theme.hl("Key") }
+  chunks[#chunks + 1] = { to, theme.hl("Target") }
+  return chunks
+end
+
 function Commander:draw_status()
-  if self.closed or not self.status:valid() then
+  if self.closed or not self.status or not self.status:valid() then
     return
   end
   local width = vim.api.nvim_win_get_width(self.status.win)
-  local chunks
+  local top
 
   if self.current then
     local job = self.current
     local seconds = math.floor((uv.now() - (job.started or uv.now())) / 1000)
     local queued = #self.queue > 0 and ("  +%d queued"):format(#self.queue) or ""
     local text = ("%s %s to %s"):format(job.verb, job.what, job.short)
-    chunks = {
+    top = {
       { " ", nil },
-      { util.truncate(text, math.max(10, width - 30)), theme.hl("Key") },
+      { util.truncate(text, math.max(10, width - 24)), theme.hl("Key") },
       { ("  %ds%s"):format(seconds, queued), theme.hl("Muted") },
       { ("   %s cancel"):format(first_key("cancel")), theme.hl("KeyHint") },
     }
   elseif self.notice then
     local hl = ({ ok = "Ok", error = "Error", warn = "Warn" })[self.notice.kind] or "Muted"
-    chunks = { { " " .. util.truncate(self.notice.text, width - 2), theme.hl(hl) } }
+    top = { { " " .. util.truncate(self.notice.text, width - 2), theme.hl(hl) } }
   else
-    local hints = {
-      { "switch", "switch" },
-      { "select", "toggle" },
-      { "copy", "copy" },
-      { "mkdir", "mkdir" },
-      { "path", "jump" },
-      { "dotfiles", "hidden" },
-      { "help", "help" },
-      { "quit", "quit" },
-    }
-    chunks = { { " ", nil } }
-    for _, hint in ipairs(hints) do
-      chunks[#chunks + 1] = { first_key(hint[2]), theme.hl("KeyHint") }
-      chunks[#chunks + 1] = { " " .. hint[1] .. "   ", theme.hl("Muted") }
-    end
+    top = self:route(width)
   end
-  render.draw(self.status.buf, ns, { chunks })
+
+  local hints = {
+    { "switch", "switch" },
+    { "select", "toggle" },
+    { "copy", "copy" },
+    { "mkdir", "mkdir" },
+    { "path", "jump" },
+    { "dotfiles", "hidden" },
+    { "help", "help" },
+    { "quit", "quit" },
+  }
+  local bottom = { { " ", nil } }
+  for _, hint in ipairs(hints) do
+    bottom[#bottom + 1] = { first_key(hint[2]), theme.hl("KeyHint") }
+    bottom[#bottom + 1] = { " " .. hint[1] .. "   ", theme.hl("Muted") }
+  end
+  render.draw(self.status.buf, ns, { top, bottom })
 end
 
 function Commander:start_timer()
@@ -869,8 +954,10 @@ function Commander:help()
     { "quit", "Close" },
   }
   local lines = {
-    "Copying from the local pane uploads; from the remote pane it downloads.",
-    "The destination is the directory the other pane is showing.",
+    "c copies FROM the active pane (marked with an arrow) TO the other one:",
+    "from Local it uploads, from the host it downloads, into the directory",
+    "the other pane is showing. The line under the panes says exactly what",
+    "c would copy and where, before you press it.",
     "",
   }
   for _, row in ipairs(rows) do
@@ -1069,6 +1156,16 @@ function M.open(h, opts)
       callback = function()
         if not self.closed and self.active ~= pane then
           self:set_active(pane)
+        end
+      end,
+    })
+    vim.api.nvim_create_autocmd("CursorMoved", {
+      group = self.augroup,
+      buffer = pane.float.buf,
+      desc = "ssh-launcher: keep the copy preview on what is under the cursor",
+      callback = function()
+        if not self.closed and self.active == pane then
+          self:draw_status()
         end
       end,
     })

@@ -324,7 +324,10 @@ Keys (all configurable under `commander.keymaps`; `?` lists the live ones):
   ?             list the keys          q  close
 
 A selected entry shows `[x]` and the pane footer counts them with their total
-size. The active pane's title starts with an arrow.
+size. The active pane's title starts with an arrow and FROM, the other's with
+TO: `c` always copies from the first into the second. The line under the
+panes previews it — "c Upload a.txt  Local:~/proj -> web-01:/srv/app" — and follows
+the cursor and the selection, so where a copy will land is never a guess.
 
 Transfers run in the background and report in the status line under the panes,
 with elapsed time and anything queued; both directories stay usable meanwhile

@@ -2082,6 +2082,8 @@ test("the two-pane window browses both machines and copies between them", functi
   contains(text_of(lc.title), "->", "the active pane is marked in text, not only colour")
   contains(text_of(rc.title), "pane-host")
   falsy(text_of(rc.title):find("->", 1, true), "the inactive pane is not")
+  contains(text_of(lc.title), "FROM", "the active pane is where copies come from")
+  contains(text_of(rc.title), "TO", "and the other is where they go")
 
   contains(lines(c.left), "docs/")
   contains(lines(c.left), "a.txt")
@@ -2100,9 +2102,17 @@ test("the two-pane window browses both machines and copies between them", functi
   press(".")
 
   -- Selection is visible as text, counted in the footer, and Esc clears it first.
+  -- The status line says what c would do before it is pressed.
+  local function status_text()
+    return table.concat(vim.api.nvim_buf_get_lines(c.status.buf, 0, -1, false), "\n")
+  end
   on(c.left, "a.txt")
+  vim.api.nvim_exec_autocmds("CursorMoved", { buffer = c.left.float.buf })
+  contains(status_text(), "Upload a.txt")
+  contains(status_text(), "-> pane-host:", "the destination is named, host and path")
   press("<Space>")
   truthy(c.left.selected["a.txt"])
+  contains(status_text(), "Upload 1 selected")
   contains(lines(c.left), "[x] a.txt")
   contains(text_of(vim.api.nvim_win_get_config(c.left.float.win).footer), "1 selected")
   press("<Esc>")
