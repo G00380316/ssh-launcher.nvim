@@ -1172,6 +1172,16 @@ function Manager:workspace()
   require("ssh_launcher.workspace").open(h)
 end
 
+--- Open the two-pane transfer window for this host.
+function Manager:commander()
+  local h = self:current()
+  if not h then
+    return
+  end
+  self.win:close()
+  require("ssh_launcher.ui.commander").launch(h)
+end
+
 ---@param direction "get"|"put"
 function Manager:transfer(direction)
   local h = self:current()
@@ -1441,6 +1451,9 @@ function M.open(opts)
   map(km.workspace, function()
     self:workspace()
   end, "Launch configured remote Neovim")
+  map(km.transfer, function()
+    self:commander()
+  end, "Two-pane file transfer")
   map(km.upload, function()
     self:transfer("put")
   end, "Upload a file")

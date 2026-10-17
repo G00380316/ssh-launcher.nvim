@@ -141,6 +141,38 @@ M.defaults = {
   },
 
   ---------------------------------------------------------------------------
+  -- Two-pane transfer (:Ssh transfer)
+  ---------------------------------------------------------------------------
+  commander = {
+    --- Fractions of the editor, or absolute columns/lines.
+    width = 0.94,
+    height = 0.8,
+    --- Start with dotfiles listed; `.` toggles them per pane.
+    show_hidden = true,
+    --- Ask before a copy replaces files that already exist at the destination.
+    confirm_overwrite = true,
+    --- Set any to `false` to unbind.
+    keymaps = {
+      open = { "<CR>", "l" },
+      parent = { "h", "-", "<BS>" },
+      switch = { "<Tab>", "<S-Tab>" },
+      toggle = "<Space>",
+      select_all = "*",
+      clear = "u",
+      copy = "c",
+      mkdir = "m",
+      --- Not plain `g`: that would swallow `gg`.
+      jump = "go",
+      hidden = ".",
+      refresh = { "r", "R" },
+      cancel = "x",
+      escape = "<Esc>",
+      help = { "?", "g?" },
+      quit = "q",
+    },
+  },
+
+  ---------------------------------------------------------------------------
   -- UI
   ---------------------------------------------------------------------------
   ui = {
@@ -302,6 +334,7 @@ M.defaults = {
     workspace = "n",
     upload = "U",
     download = "W",
+    transfer = "T",
     fleet_command = "!",
     yank_command = "y",
     open_terminal = "t",
@@ -474,6 +507,11 @@ function M.setup(user)
   if user and user.keymaps then
     for key, value in pairs(user.keymaps) do
       options.keymaps[key] = value
+    end
+  end
+  if user and user.commander and user.commander.keymaps then
+    for key, value in pairs(user.commander.keymaps) do
+      options.commander.keymaps[key] = value
     end
   end
 

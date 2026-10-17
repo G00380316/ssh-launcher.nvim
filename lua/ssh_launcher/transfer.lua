@@ -136,7 +136,7 @@ end
 ---@param remote_path string
 ---@param opts ssh_launcher.TransferOpts
 ---@param proceed fun()
-local function gate_production(h, paths, remote_path, opts, proceed)
+function M.gate_production(h, paths, remote_path, opts, proceed)
   if opts.force or not config.get().security.confirm_production or not Host.is_production(h) then
     return proceed()
   end
@@ -186,7 +186,7 @@ function M.upload(h, inputs, remote_path, opts)
   remote_path = util.nonblank(remote_path) or M.default_remote(h)
 
   warn_unsaved(paths)
-  gate_production(h, paths, remote_path, opts, function()
+  M.gate_production(h, paths, remote_path, opts, function()
     require("ssh_launcher.remote").put(h, paths, remote_path, function(ok, msg)
       if opts.on_done then
         opts.on_done(ok, msg)

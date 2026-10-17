@@ -364,6 +364,17 @@ function M.download(name, remote, dest, opts)
   end)
 end
 
+--- Open the two-pane transfer window: this machine beside a host. Select files
+--- in either pane and copy them across.
+---@param name string|nil host name, or nil to pick one
+---@param path string|nil where to start on the host
+function M.transfer(name, path)
+  M.ensure_setup()
+  with_host(name, function(h)
+    require("ssh_launcher.ui.commander").launch(h, { remote_path = path })
+  end)
+end
+
 --- Launch Neovim on a host with a temporary copy of this instance's config.
 ---@param name string|nil
 ---@param path string|nil
@@ -818,6 +829,14 @@ local SUBCOMMANDS = {
         return require("ssh_launcher.log").error("usage: :Ssh download {host} {remote} [{local}]")
       end
       M.download(name, rest[1], rest[2], { force = bang })
+    end,
+  },
+  transfer = {
+    desc = "Two panes, this machine and a host: select files and copy across",
+    complete = "host",
+    run = function(args)
+      local name, rest = split_host(args)
+      M.transfer(name, rest[1] and table.concat(rest, " ") or nil)
     end,
   },
   workspace = {

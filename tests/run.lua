@@ -1420,6 +1420,78 @@ test("scp argv recurses for directories, ends options, and keeps local names loc
   truthy(dashes >= 0 and dashes < vim.fn.index(odd, "-rf"), "the dash name comes after --")
 end)
 
+test("background scp never prompts, copies several remote paths, and carries host options", function()
+  local remote = require("ssh_launcher.remote")
+  local h = Host.normalize({
+    name = "x",
+    host = "10.0.0.9",
+    user = "me",
+    options = { UserKnownHostsFile = "/tmp/kh" },
+    compression = true,
+  })
+
+  local argv = remote.scp_argv("get", h, { "/srv/a.txt", "/srv/b dir" }, "/local/dest", { batch = true })
+  truthy(vim.tbl_contains(argv, "BatchMode=yes"), "a background copy must fail rather than wait on a prompt")
+  truthy(vim.tbl_contains(argv, "ServerAliveInterval=15"), "and give up on a connection that has gone away")
+  truthy(vim.tbl_contains(argv, "UserKnownHostsFile=/tmp/kh"), "the host's own ssh options apply to scp too")
+  truthy(vim.tbl_contains(argv, "-C"), "as does compression")
+  eq(argv[#argv], "/local/dest")
+  eq(argv[#argv - 1], "me@10.0.0.9:/srv/b dir")
+  eq(argv[#argv - 2], "me@10.0.0.9:/srv/a.txt", "every remote source is its own argument")
+
+  falsy(
+    vim.tbl_contains(remote.scp_argv("put", h, "/srv/", "/local/x"), "BatchMode=yes"),
+    "interactive copies still may prompt"
+  )
+
+  eq(remote.glob_escape("report[1] *.txt"), "report\\[1\\] \\*.txt", "a literal name must not be read as a pattern")
+  eq(remote.glob_escape("plain-name.txt"), "plain-name.txt")
+end)
+
+test("detailed remote listings carry size and mtime, and survive a zsh login shell", function()
+  local remote = require("ssh_launcher.remote")
+  local dir = TMP .. "/detailed-list"
+  vim.fn.mkdir(dir .. "/sub", "p")
+  vim.fn.writefile({ "twelve bytes" }, dir .. "/a file.txt") -- 13 bytes with the newline
+
+  local res = util.system_sync({ "sh", "-c", remote.list_command(dir, true) }, 3000)
+  truthy(res.ok, res.stderr)
+  local _, entries, err = remote.parse_listing(res.stdout, true)
+  eq(err, nil)
+  eq(entries[1].name, "sub")
+  eq(entries[2].name, "a file.txt")
+  eq(entries[2].size, 13)
+  truthy(entries[2].mtime and math.abs(entries[2].mtime - os.time()) < 300, "mtime is a recent epoch")
+
+  -- A host with an unfamiliar stat just has no metadata; it still lists.
+  local _, plain = remote.parse_listing("/d\0f\0garbage\0name\0", true)
+  eq(plain[1], { type = "file", name = "name" })
+  local _, _, truncated = remote.parse_listing("/d\0f\0123 456\0", true)
+  contains(truncated, "truncated")
+
+  -- The regression: the command used to reach the login shell as raw text. In zsh
+  -- an unmatched glob (no `..?*` entries here) is fatal and `path` is tied to $PATH.
+  if util.has_executable("zsh") then
+    local h = Host.normalize({ name = "z", host = "h" })
+    local argv = remote.command_argv(h, remote.list_command(dir, true))
+    local viaz = util.system_sync({ "zsh", "-c", argv[#argv] }, 3000)
+    truthy(viaz.ok, "a zsh login shell must be able to list a directory: " .. viaz.stderr)
+    local _, listed = remote.parse_listing(viaz.stdout, true)
+    eq(listed[2].name, "a file.txt")
+  end
+end)
+
+test("human sizes stay short", function()
+  eq(util.human_size(0), "0B")
+  eq(util.human_size(1023), "1023B")
+  eq(util.human_size(1024), "1.0K")
+  eq(util.human_size(1536), "1.5K")
+  eq(util.human_size(47 * 1024), "47K")
+  eq(util.human_size(3 * 1024 * 1024 * 1024), "3.0G")
+  eq(util.human_size(nil), "")
+  eq(util.human_size(-1), "")
+end)
+
 test("local transfer paths resolve to real files before scp is ever started", function()
   local transfer = require("ssh_launcher.transfer")
   local base = TMP .. "/resolve"
@@ -1471,7 +1543,7 @@ test("remote commands use the saved SSH configuration without session side effec
     forward_agent = true,
   })
   local argv = remote.command_argv(h, "printf hello")
-  eq(argv[#argv], "printf hello")
+  eq(argv[#argv], "exec sh -c 'printf hello'", "the login shell only ever sees a one-line sh -c")
   truthy(vim.tbl_contains(argv, "2222"), "port")
   truthy(vim.tbl_contains(argv, "/tmp/key"), "identity")
   truthy(vim.tbl_contains(argv, "bastion"), "jump host")
@@ -1697,15 +1769,18 @@ end)
 
 --- Put a recording `scp` first on PATH. Returns the argv of its next
 --- invocation (nil if it never ran), and a function that restores PATH.
-local function fake_scp()
+--- With `hang`, scp records its arguments and its pid, then sleeps: a transfer
+--- that is still in flight, for status, queue and cancel tests.
+local function fake_scp(hang)
   local bin = TMP .. "/fake-bin"
   local record = TMP .. "/scp-argv.txt"
   vim.fn.mkdir(bin, "p")
   vim.fn.writefile({
     "#!/bin/sh",
+    ("echo $$ > %s"):format(vim.fn.shellescape(TMP .. "/scp.pid")),
     ('for a in "$@"; do printf "%%s\\n" "$a" >> %s; done'):format(vim.fn.shellescape(record)),
     ('printf "==\\n" >> %s'):format(vim.fn.shellescape(record)),
-    "exit 0",
+    hang and "exec sleep 30" or "exit 0",
   }, bin .. "/scp")
   vim.uv.fs_chmod(bin .. "/scp", tonumber("755", 8))
 
@@ -1925,6 +2000,394 @@ test(":Ssh upload and :Ssh download drive scp with the right arguments", functio
   dialog.confirm = original
   restore()
   vim.cmd("silent! only")
+  configure()
+end)
+
+test("the two-pane window browses both machines and copies between them", function()
+  local commander = require("ssh_launcher.ui.commander")
+  local dialog = require("ssh_launcher.ui.dialog")
+
+  -- A stand-in ssh that runs the remote command on this machine, so the
+  -- "remote" pane lists a real directory.
+  local runner = TMP .. "/fake-commander-ssh"
+  vim.fn.writefile({ "#!/bin/sh", 'for arg in "$@"; do command="$arg"; done', 'exec sh -c "$command"' }, runner)
+  vim.uv.fs_chmod(runner, tonumber("755", 8))
+  local next_call, never_runs, restore_path = fake_scp()
+  configure({ ssh = { binary = runner }, remote = { adapter = "builtin", timeout = 3000 } })
+  reset_store()
+  store.add({ name = "pane-host", host = "example.invalid", user = "me" })
+  local h = store.get_by_name("pane-host")
+
+  local lroot, rroot = TMP .. "/pane-local", TMP .. "/pane-remote"
+  vim.fn.mkdir(lroot .. "/docs", "p")
+  vim.fn.mkdir(lroot .. "/src", "p")
+  vim.fn.mkdir(rroot .. "/logs", "p")
+  vim.fn.writefile({ "aa" }, lroot .. "/a.txt")
+  vim.fn.writefile({ "bbbb" }, lroot .. "/b.txt")
+  vim.fn.writefile({ "h" }, lroot .. "/.hidden")
+  vim.fn.writefile({ "remote a" }, rroot .. "/a.txt")
+  vim.fn.writefile({ "r" }, rroot .. "/report[1].txt")
+  vim.fn.writefile({ "p" }, rroot .. "/.profile")
+  local L, R = vim.uv.fs_realpath(lroot), vim.uv.fs_realpath(rroot)
+
+  local function lines(pane)
+    return vim.api.nvim_buf_get_lines(pane.float.buf, 0, -1, false)
+  end
+  local function text_of(value)
+    if type(value) ~= "table" then
+      return tostring(value or "")
+    end
+    local out = {}
+    for _, chunk in ipairs(value) do
+      out[#out + 1] = type(chunk) == "table" and chunk[1] or chunk
+    end
+    return table.concat(out)
+  end
+  local function press(keys)
+    vim.api.nvim_feedkeys(vim.keycode(keys), "mx", false)
+  end
+  local function on(pane, name)
+    for line, entry in pairs(pane.rows) do
+      if entry.name == name then
+        pane.float:set_cursor(line)
+        return
+      end
+    end
+    error("no entry named " .. name .. " in " .. pane.path)
+  end
+  local function loaded(c)
+    return vim.wait(5000, function()
+      return not c.left.loading and not c.right.loading and #c.left.listing > 0 and #c.right.listing > 0
+    end)
+  end
+
+  local c = commander.open(h, { local_path = lroot, remote_path = rroot })
+  truthy(c, "the window opens")
+  truthy(loaded(c), "both panes list their directory")
+  eq(c.left.path, L)
+  eq(c.right.path, R)
+  eq(c.active, c.left)
+
+  -- Both machines are on screen at once, edge to edge, with a status line under them.
+  local lc, rc, sc =
+    vim.api.nvim_win_get_config(c.left.float.win),
+    vim.api.nvim_win_get_config(c.right.float.win),
+    vim.api.nvim_win_get_config(c.status.win)
+  eq(lc.col + lc.width + 2, rc.col, "the panes sit edge to edge")
+  eq(lc.row, rc.row)
+  eq(lc.height, rc.height)
+  eq(sc.row, lc.row + lc.height + 2, "the status line is directly under the panes")
+  eq(sc.width, rc.col + rc.width + 2 - lc.col, "and spans both")
+  contains(text_of(lc.title), "Local")
+  contains(text_of(lc.title), "->", "the active pane is marked in text, not only colour")
+  contains(text_of(rc.title), "pane-host")
+  falsy(text_of(rc.title):find("->", 1, true), "the inactive pane is not")
+
+  contains(lines(c.left), "docs/")
+  contains(lines(c.left), "a.txt")
+  contains(lines(c.left), "5B", "local sizes are shown (b.txt is 'bbbb' and a newline)")
+  contains(lines(c.right), "logs/")
+  contains(lines(c.right), "report[1].txt")
+  contains(lines(c.right), "9B", "remote sizes come from the host's stat ('remote a' and a newline)")
+  eq(c.left.rows[1].type, "parent", "the way up is always the first row")
+
+  -- Dotfiles: shown by default, toggled per pane.
+  contains(lines(c.left), ".hidden")
+  press(".")
+  falsy(table.concat(lines(c.left), "\n"):find(".hidden", 1, true), "dotfiles hide")
+  contains(text_of(vim.api.nvim_win_get_config(c.left.float.win).footer), "dotfiles hidden")
+  contains(lines(c.right), ".profile", "the other pane is unaffected")
+  press(".")
+
+  -- Selection is visible as text, counted in the footer, and Esc clears it first.
+  on(c.left, "a.txt")
+  press("<Space>")
+  truthy(c.left.selected["a.txt"])
+  contains(lines(c.left), "[x] a.txt")
+  contains(text_of(vim.api.nvim_win_get_config(c.left.float.win).footer), "1 selected")
+  press("<Esc>")
+  eq(next(c.left.selected), nil, "<Esc> clears a selection before it closes anything")
+  truthy(commander.instance(), "and the window is still open")
+  press("*")
+  truthy(
+    c.left.selected["a.txt"] and c.left.selected["b.txt"] and c.left.selected["docs"],
+    "* selects everything shown"
+  )
+  press("*")
+  eq(next(c.left.selected), nil, "and unselects when everything already is")
+
+  -- Switching panes and moving through directories.
+  press("<Tab>")
+  eq(c.active, c.right)
+  eq(vim.api.nvim_get_current_win(), c.right.float.win)
+  press("<Tab>")
+  eq(c.active, c.left)
+  on(c.left, "docs")
+  press("<CR>")
+  vim.wait(2000, function()
+    return c.left.path == L .. "/docs"
+  end)
+  eq(c.left.path, L .. "/docs")
+  contains(lines(c.left), "(empty)")
+  press("h")
+  vim.wait(2000, function()
+    return c.left.path == L
+  end)
+  eq(c.left.path, L)
+  eq(
+    c.left.rows[vim.api.nvim_win_get_cursor(c.left.float.win)[1]].name,
+    "docs",
+    "going up lands on the directory you left"
+  )
+
+  -- Upload two files; a.txt already exists remotely, so it asks, and no is no.
+  local asked
+  local original_confirm = dialog.confirm
+  dialog.confirm = function(opts, cb)
+    asked = opts
+    cb(false)
+  end
+  on(c.left, "a.txt")
+  press("<Space>")
+  press("<Space>") -- a.txt then b.txt
+  truthy(
+    never_runs(function()
+      press("c")
+    end),
+    "declining the overwrite prompt copies nothing"
+  )
+  contains(asked.lines, "a.txt")
+  truthy(c.left.selected["a.txt"] and c.left.selected["b.txt"], "a declined copy keeps the selection")
+
+  dialog.confirm = function(_, cb)
+    cb(true)
+  end
+  local argv = next_call(function()
+    press("c")
+  end)
+  truthy(argv, "scp ran")
+  truthy(vim.tbl_contains(argv, "BatchMode=yes"), "the transfer is non-interactive: " .. vim.inspect(argv))
+  truthy(
+    vim.tbl_contains(argv, L .. "/a.txt") and vim.tbl_contains(argv, L .. "/b.txt"),
+    "both selected files are sent"
+  )
+  eq(argv[#argv], "me@example.invalid:" .. R, "to the directory the other pane is showing")
+  vim.wait(2000, function()
+    return c.current == nil
+  end)
+  eq(next(c.left.selected), nil, "the selection is spent once the copy starts")
+  contains(text_of(vim.api.nvim_buf_get_lines(c.status.buf, 0, -1, false)), "Uploaded 2 items to pane-host")
+
+  -- Download from the remote pane into the local one; a literal name is not a glob.
+  press("<Tab>")
+  on(c.right, "report[1].txt")
+  press("<Space>")
+  on(c.right, "logs")
+  press("<Space>")
+  argv = next_call(function()
+    press("c")
+  end)
+  truthy(argv)
+  truthy(vim.tbl_contains(argv, "-r"), "a download may include directories")
+  truthy(
+    vim.tbl_contains(argv, "me@example.invalid:" .. R .. "/report\\[1\\].txt"),
+    "glob characters are escaped: " .. vim.inspect(argv)
+  )
+  truthy(vim.tbl_contains(argv, "me@example.invalid:" .. R .. "/logs"))
+  eq(argv[#argv], L, "into the local pane's directory")
+  vim.wait(2000, function()
+    return c.current == nil
+  end)
+
+  -- Copying with nothing under the cursor says so instead of guessing.
+  press("<Tab>")
+  press("gg") -- the ../ row
+  truthy(
+    never_runs(function()
+      press("c")
+    end),
+    "../ is not a thing to copy"
+  )
+  contains(text_of(vim.api.nvim_buf_get_lines(c.status.buf, 0, -1, false)), "nothing to copy")
+
+  -- Typing a path, and making a directory on each side.
+  local original_input = vim.ui.input
+  vim.ui.input = function(_, cb)
+    cb(L .. "/src")
+  end
+  press("go")
+  vim.wait(2000, function()
+    return c.left.path == L .. "/src"
+  end)
+  eq(c.left.path, L .. "/src", "go jumps to a typed path")
+  vim.ui.input = function(_, cb)
+    cb("..")
+  end
+  press("go")
+  vim.wait(2000, function()
+    return c.left.path == L
+  end)
+  eq(c.left.path, L, "a relative path is taken from the pane's directory")
+
+  vim.ui.input = function(_, cb)
+    cb("fresh")
+  end
+  press("m")
+  truthy(util.is_dir(L .. "/fresh"), "m makes a local directory")
+  vim.wait(2000, function()
+    return table.concat(lines(c.left), "\n"):find("fresh/", 1, true) ~= nil
+  end)
+  contains(lines(c.left), "fresh/")
+
+  press("<Tab>")
+  vim.ui.input = function(_, cb)
+    cb("made-remotely/deep")
+  end
+  press("m")
+  vim.wait(3000, function()
+    return util.is_dir(R .. "/made-remotely/deep")
+  end)
+  truthy(util.is_dir(R .. "/made-remotely/deep"), "and a remote one, parents included")
+  vim.ui.input = original_input
+
+  -- A host tagged production confirms an upload that the user has not already
+  -- been asked about, and downloads from it are not gated at all.
+  store.add({ name = "live-host", host = "example.invalid", user = "me", tags = { "prod" } })
+  press("q")
+  falsy(commander.instance(), "q closes the window")
+  falsy(vim.api.nvim_win_is_valid(c.left.float.win or -1), "and both panes with it")
+
+  local live = commander.open(store.get_by_name("live-host"), { local_path = lroot, remote_path = rroot })
+  loaded(live)
+  local gated
+  dialog.confirm = function(opts, cb)
+    gated = opts
+    cb(false)
+  end
+  on(live.left, "b.txt")
+  truthy(
+    never_runs(function()
+      press("c")
+    end),
+    "a production upload waits for a yes"
+  )
+  truthy(gated and gated.destructive, "and says so")
+  live:close()
+
+  dialog.confirm = original_confirm
+  restore_path()
+  configure()
+  vim.cmd("silent! only")
+end)
+
+test("a transfer in flight shows its progress, queues behind itself, and cancels cleanly", function()
+  local commander = require("ssh_launcher.ui.commander")
+  local runner = TMP .. "/fake-commander-ssh"
+  local next_call, _, restore_path = fake_scp(true) -- scp that never finishes on its own
+  configure({ ssh = { binary = runner }, remote = { adapter = "builtin", timeout = 3000 } })
+  reset_store()
+  store.add({ name = "slow-host", host = "example.invalid", user = "me" })
+
+  local lroot, rroot = TMP .. "/slow-local", TMP .. "/slow-remote"
+  vim.fn.mkdir(lroot, "p")
+  vim.fn.mkdir(rroot, "p")
+  vim.fn.writefile({ "1" }, lroot .. "/one.bin")
+  vim.fn.writefile({ "2" }, lroot .. "/two.bin")
+  vim.fn.writefile({ "x" }, rroot .. "/placeholder")
+
+  local c = commander.open(store.get_by_name("slow-host"), { local_path = lroot, remote_path = rroot })
+  vim.wait(5000, function()
+    return #c.left.listing > 0 and #c.right.listing > 0 and not c.right.loading
+  end)
+  local function status()
+    return table.concat(vim.api.nvim_buf_get_lines(c.status.buf, 0, -1, false), "\n")
+  end
+  local function press(keys)
+    vim.api.nvim_feedkeys(vim.keycode(keys), "mx", false)
+  end
+  local function on(name)
+    for line, entry in pairs(c.left.rows) do
+      if entry.name == name then
+        c.left.float:set_cursor(line)
+      end
+    end
+  end
+
+  on("one.bin")
+  truthy(
+    next_call(function()
+      press("c")
+    end),
+    "the first transfer starts"
+  )
+  truthy(c.current, "and is in flight")
+  contains(status(), "Uploading one.bin to slow-host", "the status line says what is moving and where")
+  contains(status(), "cancel", "and how to stop it")
+
+  on("two.bin")
+  press("c")
+  eq(#c.queue, 1, "a second copy waits its turn instead of running alongside")
+  c:draw_status()
+  contains(status(), "+1 queued")
+
+  local pid = tonumber(vim.fn.readfile(TMP .. "/scp.pid")[1])
+  truthy(vim.uv.kill(pid, 0) == 0, "scp is really running")
+  press("x")
+  truthy(
+    vim.wait(3000, function()
+      return c.current == nil
+    end),
+    "cancelling ends the transfer"
+  )
+  eq(#c.queue, 0, "and drops what was queued behind it")
+  contains(status(), "cancelled")
+  truthy(
+    vim.wait(3000, function()
+      return vim.uv.kill(pid, 0) ~= 0
+    end),
+    "the scp process is gone, not left running"
+  )
+  eq(tonumber(vim.fn.readfile(TMP .. "/scp.pid")[1]), pid, "and the queued transfer never started")
+
+  press("x")
+  contains(status(), "nothing is transferring", "cancelling an idle window is harmless")
+
+  c:close()
+  restore_path()
+  configure()
+  vim.cmd("silent! only")
+end)
+
+test(":Ssh transfer opens the window, starting where it is told", function()
+  local commander = require("ssh_launcher.ui.commander")
+  local runner = TMP .. "/fake-commander-ssh"
+  configure({ ssh = { binary = runner }, remote = { adapter = "builtin", timeout = 3000 } })
+  reset_store()
+  store.add({ name = "cmd-host", host = "example.invalid", user = "me" })
+  local start = TMP .. "/transfer-start"
+  vim.fn.mkdir(start, "p")
+
+  vim.cmd("Ssh transfer cmd-host " .. start)
+  local c = commander.instance()
+  truthy(c, ":Ssh transfer opens the window")
+  vim.wait(5000, function()
+    return not c.right.loading and c.right.path == vim.uv.fs_realpath(start)
+  end)
+  eq(c.right.path, vim.uv.fs_realpath(start), "the remote pane starts at the given path")
+  eq(c.host.name, "cmd-host")
+  c:close()
+
+  truthy(vim.tbl_contains(require("ssh_launcher")._subcommands(), "transfer"))
+  truthy(
+    vim.tbl_contains(require("ssh_launcher")._complete("", "Ssh transfer "), "cmd-host"),
+    "it completes host names"
+  )
+
+  -- Too small a terminal is an error, not a broken layout.
+  local columns = vim.o.columns
+  vim.o.columns = 40
+  falsy(commander.open(store.get_by_name("cmd-host")), "two panes do not fit in 40 columns")
+  vim.o.columns = columns
   configure()
 end)
 

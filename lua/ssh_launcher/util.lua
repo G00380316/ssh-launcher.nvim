@@ -355,6 +355,25 @@ function M.width(s)
   return vim.fn.strdisplaywidth(s or "")
 end
 
+--- A byte count as `512B`, `1.5K`, `12M`: at most five cells wide.
+---@param bytes integer|nil
+---@return string
+function M.human_size(bytes)
+  if type(bytes) ~= "number" or bytes < 0 then
+    return ""
+  end
+  if bytes < 1024 then
+    return ("%dB"):format(bytes)
+  end
+  local units = { "K", "M", "G", "T", "P" }
+  local value, unit = bytes, 0
+  repeat
+    value = value / 1024
+    unit = unit + 1
+  until value < 1024 or unit == #units
+  return (value < 10 and "%.1f%s" or "%.0f%s"):format(value, units[unit])
+end
+
 --- Truncate to `n` display cells, appending an ellipsis when cut.
 ---@param s string
 ---@param n integer

@@ -66,6 +66,7 @@ local SPECS = {
           { keys_for("probe"), "Re-check reachability now" },
           { keys_for("agent"), "ssh-agent: list, add, remove keys" },
           { keys_for("copy_id"), "Install your public key on the remote" },
+          { keys_for("transfer"), "Two panes: browse both machines, copy across" },
           { keys_for("upload"), "Send a file to the host" },
           { keys_for("download"), "Fetch a file from the host" },
           { keys_for("keygen"), "Generate a new key pair" },

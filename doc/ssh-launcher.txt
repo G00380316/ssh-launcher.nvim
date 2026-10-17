@@ -129,6 +129,10 @@ edit them.
 :Ssh browse [{name} [{path}]]
                         Browse and edit a host's files over SSH. {path} defaults
                         to the host's Remote dir, then its home directory.
+:Ssh transfer [{name} [{path}]]
+                        Two panes, this machine and a host: select files in
+                        either and copy them across. See
+                        |ssh-launcher-commander|.
 :Ssh upload [{name} {local}... [{remote}]]
                         Send files or directories to a host. See
                         |ssh-launcher-transfer|.
@@ -186,6 +190,7 @@ Default mappings (all configurable, see |ssh-launcher-config|):
   !             run one command on every marked host
   b             browse the host's files
   n             launch remote Neovim with this configuration
+  T             two panes: browse this machine and the host, copy across
   U / W         upload / download a file
   K             forget this host's key in known_hosts
 
@@ -284,6 +289,59 @@ Tab completion offers saved hosts, then local paths. Remote paths are not
 completed. In the manager `U` and `W` run the same prompts for the host under
 the cursor. If the key needs a passphrase, ssh asks for it in the transfer
 window.
+
+To browse instead of typing paths, use the two-pane window
+(|ssh-launcher-commander|).
+
+Two-pane transfer                                    *ssh-launcher-commander*
+                                                          *:Ssh-transfer*
+>vim
+    :Ssh transfer [{host} [{remote path}]]
+<
+Press `T` on a host in the manager, or run the command. This machine is on the
+left and the host on the right, each with names, sizes and modification times.
+Move around either one like any Neovim buffer (`/` searches, `gg` and `G` work),
+select what you want, and copy it to the other side.
+
+  `c` copies the selection - or the file under the cursor - into the directory
+  the OTHER pane is showing. From the left pane that is an upload; from the
+  right pane it is a download. There is no path to type.
+
+Keys (all configurable under `commander.keymaps`; `?` lists the live ones):
+
+  <CR> l        open a directory, or edit the file under the cursor
+  h - <BS>      parent directory (the cursor lands on where you came from)
+  <Tab>         switch between the panes
+  <Space>       select or unselect the entry, then move down
+  *             select everything shown; again to unselect it
+  u             clear the selection        <Esc>  clear it, or else close
+  c             copy to the other pane
+  m             make a directory (parents included) in this pane
+  go            go to a typed path; a relative path is taken from here
+  .             show or hide dotfiles in this pane
+  r             reload this pane
+  x             cancel the running transfer and anything queued behind it
+  ?             list the keys          q  close
+
+A selected entry shows `[x]` and the pane footer counts them with their total
+size. The active pane's title starts with an arrow.
+
+Transfers run in the background and report in the status line under the panes,
+with elapsed time and anything queued; both directories stay usable meanwhile
+and the destination pane refreshes when a copy finishes. Because a background
+transfer cannot ask for a passphrase, a locked key is offered to ssh-agent when
+the window opens, exactly as for |ssh-launcher-remote-files|; hosts that need a
+typed password should use `:Ssh upload` / `:Ssh download`, which run scp in a
+terminal.
+
+Safeguards~
+  - Files that already exist at the destination are listed and need a yes
+    (`commander.confirm_overwrite`). A "no" leaves your selection as it was.
+  - Uploading to a production-tagged host asks first, as `:Ssh upload` does.
+  - Names are sent literally: a file called `report[1].txt` is that file, not
+    a pattern.
+  - Closing the window while a copy runs lets it finish; the result is still
+    reported.
 
 Configured remote Neovim                         *ssh-launcher-remote-neovim*
 Press `n` on a host, or run `:Ssh workspace {name} {path}`. The plugin packages
@@ -656,6 +714,14 @@ Defaults in full: >lua
         bundle_timeout = 30000,
       },
 
+      commander = {          -- :Ssh transfer, see |ssh-launcher-commander|
+        width = 0.94,        -- fractions of the editor, or absolute sizes
+        height = 0.8,
+        show_hidden = true,  -- start with dotfiles listed; "." toggles
+        confirm_overwrite = true,
+        keymaps = { copy = "c", switch = { "<Tab>", "<S-Tab>" } }, -- any may be false
+      },
+
       ui = {
         border = "rounded",
         width = 0.82,
@@ -764,6 +830,7 @@ source, so a repository can ship its own staging hosts. Use the same format as
     ssh.agent()
     ssh.sessions()
     ssh.browse(name, path)     -- pick a host when name is nil
+    ssh.transfer(name, path)   -- two-pane window; pick a host when name is nil
     ssh.upload(name, paths, remote, opts)    -- paths is a list; opts.force skips prompts
     ssh.download(name, remote, dest, opts)   -- opts.on_done(ok, msg) reports the result
     ssh.workspace(name, path)  -- configured Neovim running on the host
