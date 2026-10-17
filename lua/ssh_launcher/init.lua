@@ -321,6 +321,49 @@ function M.browse(name, path)
   end)
 end
 
+--- Run `fn` with the saved host called `name`, or with one the user picks.
+---@param name string|nil
+---@param fn fun(h: ssh_launcher.Host)
+local function with_host(name, fn)
+  if not name then
+    return require("ssh_launcher.ui.picker").pick(fn)
+  end
+  local h = require("ssh_launcher.store").get_by_name(name)
+  if not h then
+    return require("ssh_launcher.log").error(("no host matches %q"):format(name))
+  end
+  fn(h)
+end
+
+--- Send local files or directories to a host.
+---
+--- Local paths accept `~`, `$VAR`, globs and `%` (the current file). With no
+--- paths you are asked; with no `remote` they land in the host's landing
+--- directory. With several sources `remote` is the directory they go into.
+---@param name string|nil host name, or nil to pick one
+---@param paths string[]|nil
+---@param remote string|nil
+---@param opts ssh_launcher.TransferOpts|nil
+function M.upload(name, paths, remote, opts)
+  M.ensure_setup()
+  with_host(name, function(h)
+    require("ssh_launcher.transfer").upload(h, paths, remote, opts)
+  end)
+end
+
+--- Fetch a file or directory from a host. It lands in the current directory
+--- unless `dest` says otherwise, and nothing is overwritten without asking.
+---@param name string|nil host name, or nil to pick one
+---@param remote string|nil
+---@param dest string|nil
+---@param opts ssh_launcher.TransferOpts|nil
+function M.download(name, remote, dest, opts)
+  M.ensure_setup()
+  with_host(name, function(h)
+    require("ssh_launcher.transfer").download(h, remote, dest, opts)
+  end)
+end
+
 --- Launch Neovim on a host with a temporary copy of this instance's config.
 ---@param name string|nil
 ---@param path string|nil
@@ -609,6 +652,25 @@ local function host_and_path(args)
   return table.concat(args, " "), nil
 end
 
+--- Split `{host} {arg}…` where the host's label may itself contain spaces: the
+--- longest leading run of arguments that names a saved host wins.
+---@param args string[]
+---@return string|nil name, string[] rest, boolean found
+local function split_host(args)
+  if #args == 0 then
+    return nil, {}, false
+  end
+  local store = require("ssh_launcher.store")
+  for i = #args, 1, -1 do
+    local name = table.concat(args, " ", 1, i)
+    if store.get_by_name(name) then
+      return name, vim.list_slice(args, i + 1), true
+    end
+  end
+  -- Not a saved host; the first word is what the error should quote.
+  return args[1], vim.list_slice(args, 2), false
+end
+
 ---@type table<string, { run: fun(args: string[], bang: boolean), desc: string, complete: string|nil }>
 local SUBCOMMANDS = {
   open = {
@@ -737,6 +799,27 @@ local SUBCOMMANDS = {
       M.browse(name, path)
     end,
   },
+  upload = {
+    desc = "Send files or directories to a host: upload {host} {local}… [{remote}]",
+    complete = "upload",
+    run = function(args, bang)
+      local name, rest = split_host(args)
+      -- As with scp, the last of several paths is where they are going.
+      local remote = #rest >= 2 and table.remove(rest) or nil
+      M.upload(name, rest, remote, { force = bang })
+    end,
+  },
+  download = {
+    desc = "Fetch a file or directory from a host: download {host} {remote} [{local}]",
+    complete = "download",
+    run = function(args, bang)
+      local name, rest = split_host(args)
+      if #rest > 2 then
+        return require("ssh_launcher.log").error("usage: :Ssh download {host} {remote} [{local}]")
+      end
+      M.download(name, rest[1], rest[2], { force = bang })
+    end,
+  },
   workspace = {
     desc = "Launch Neovim on a host with this configuration",
     complete = "host",
@@ -784,6 +867,31 @@ local SUBCOMMANDS = {
 }
 
 ---@param arglead string
+---@return string[]
+local function complete_hosts(arglead)
+  M.ensure_setup()
+  local Host = require("ssh_launcher.host")
+  local names = {}
+  for _, h in ipairs(M.hosts()) do
+    local label = Host.label(h)
+    if label:find(arglead, 1, true) == 1 then
+      names[#names + 1] = label
+    end
+  end
+  table.sort(names)
+  return names
+end
+
+--- Local paths, with spaces escaped so each stays a single command argument.
+---@param arglead string
+---@return string[]
+local function complete_local_paths(arglead)
+  return vim.tbl_map(function(path)
+    return (path:gsub(" ", "\\ "))
+  end, vim.fn.getcompletion(arglead, "file"))
+end
+
+---@param arglead string
 ---@param cmdline string
 ---@return string[]
 local function complete(arglead, cmdline)
@@ -805,17 +913,20 @@ local function complete(arglead, cmdline)
     return vim.fn.getcompletion(arglead, "file")
   end
   if sub.complete == "host" then
+    return complete_hosts(arglead)
+  end
+  if sub.complete == "upload" or sub.complete == "download" then
     M.ensure_setup()
-    local Host = require("ssh_launcher.host")
-    local names = {}
-    for _, h in ipairs(M.hosts()) do
-      local label = Host.label(h)
-      if label:find(arglead, 1, true) == 1 then
-        names[#names + 1] = label
-      end
+    -- The words already finished, between the subcommand and the one being typed.
+    local _, rest, found = split_host(vim.list_slice(parts, 3, #parts - 1))
+    if not found then
+      return complete_hosts(arglead)
     end
-    table.sort(names)
-    return names
+    -- Remote paths cannot be completed without a round trip; a download's
+    -- second path is local again.
+    if sub.complete == "upload" or #rest == 1 then
+      return complete_local_paths(arglead)
+    end
   end
   return {}
 end

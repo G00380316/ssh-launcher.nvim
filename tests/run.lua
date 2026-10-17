@@ -102,6 +102,7 @@ test("every module loads", function()
     "tunnel",
     "fleet",
     "remote",
+    "transfer",
     "workspace",
     "ui.theme",
     "ui.float",
@@ -1390,6 +1391,71 @@ test("scp transfers pass paths as separate arguments", function()
   eq(down[#down], "/local/x", "get sends the local path last")
 end)
 
+test("scp argv recurses for directories, ends options, and keeps local names local", function()
+  local remote = require("ssh_launcher.remote")
+  local h = Host.normalize({ name = "x", host = "10.0.0.9", user = "me" })
+
+  local dir = TMP .. "/argv-dir"
+  local file = TMP .. "/argv-file.txt"
+  vim.fn.mkdir(dir, "p")
+  vim.fn.writefile({ "x" }, file)
+
+  local plain = remote.scp_argv("put", h, "/srv/", file)
+  falsy(vim.tbl_contains(plain, "-r"), "a plain file needs no -r")
+
+  local argv = remote.scp_argv("put", h, "/srv/", { file, dir })
+  truthy(vim.tbl_contains(argv, "-r"), "a directory among the sources turns on -r")
+  eq(argv[#argv], "me@10.0.0.9:/srv/", "the destination is last")
+  eq(argv[#argv - 1], dir, "every source comes before it, in order")
+  eq(argv[#argv - 2], file)
+  eq(argv[#argv - 3], "--", "options end before the first path")
+
+  truthy(vim.tbl_contains(remote.scp_argv("get", h, "/srv/x", "/local/x"), "-r"), "downloads can be directories")
+
+  -- `a:b` would otherwise be read as host `a`; a leading dash as an option.
+  local odd = remote.scp_argv("put", h, "/srv/", { "a:b.txt", "-rf" })
+  truthy(vim.tbl_contains(odd, "./a:b.txt"), vim.inspect(odd))
+  truthy(vim.tbl_contains(odd, "-rf"), "a dash-named path is data, because of --")
+  local dashes = vim.fn.index(odd, "--")
+  truthy(dashes >= 0 and dashes < vim.fn.index(odd, "-rf"), "the dash name comes after --")
+end)
+
+test("local transfer paths resolve to real files before scp is ever started", function()
+  local transfer = require("ssh_launcher.transfer")
+  local base = TMP .. "/resolve"
+  vim.fn.mkdir(base .. "/sub", "p")
+  vim.fn.writefile({ "1" }, base .. "/a.log")
+  vim.fn.writefile({ "2" }, base .. "/b.log")
+  vim.fn.writefile({ "3" }, base .. "/c[1].txt")
+  vim.fn.writefile({ "4" }, base .. "/sp ace.txt")
+
+  local paths = transfer.resolve_local({ base .. "/*.log", base .. "/a.log", base .. "/sub/" })
+  eq(paths, { base .. "/a.log", base .. "/b.log", base .. "/sub" }, "globs expand, duplicates collapse, slashes go")
+
+  eq(transfer.resolve_local({ base .. "/c[1].txt" }), { base .. "/c[1].txt" }, "a literal name beats a pattern")
+  eq(transfer.resolve_local({ base .. "/sp ace.txt" }), { base .. "/sp ace.txt" })
+
+  local none, err = transfer.resolve_local({ base .. "/*.zip" })
+  falsy(none)
+  contains(err, "nothing matches")
+  local _, missing = transfer.resolve_local({ base .. "/a.log", base .. "/nope.txt" })
+  contains(missing, "no such file or directory")
+
+  eq(transfer.resolve_local({ "~" }), { (util.home():gsub("/+$", "")) }, "~ expands")
+
+  vim.cmd("enew")
+  local _, unnamed = transfer.resolve_local({ "%" })
+  contains(unnamed, "not a file", "% needs a file buffer")
+  vim.cmd("edit " .. vim.fn.fnameescape(base .. "/a.log"))
+  -- Neovim names a buffer by its real path, which differs from tempname() on macOS.
+  eq(transfer.resolve_local({ "%" }), { vim.uv.fs_realpath(base .. "/a.log") }, "% is the current file")
+  vim.cmd("bwipeout!")
+
+  local landing = Host.normalize({ name = "x", host = "h", remote_dir = "/srv/app/" })
+  eq(transfer.default_remote(landing), "/srv/app/", "a directory, so a typo cannot create a file")
+  eq(transfer.default_remote(Host.normalize({ name = "y", host = "h" })), "./")
+end)
+
 test("remote commands use the saved SSH configuration without session side effects", function()
   local remote = require("ssh_launcher.remote")
   local h = Host.normalize({
@@ -1627,6 +1693,267 @@ test("a real process receives the argv we intend, with no shell in between", fun
 
   truthy(#require("ssh_launcher.connect").sessions() >= 1, "the session was registered")
   configure()
+end)
+
+--- Put a recording `scp` first on PATH. Returns the argv of its next
+--- invocation (nil if it never ran), and a function that restores PATH.
+local function fake_scp()
+  local bin = TMP .. "/fake-bin"
+  local record = TMP .. "/scp-argv.txt"
+  vim.fn.mkdir(bin, "p")
+  vim.fn.writefile({
+    "#!/bin/sh",
+    ('for a in "$@"; do printf "%%s\\n" "$a" >> %s; done'):format(vim.fn.shellescape(record)),
+    ('printf "==\\n" >> %s'):format(vim.fn.shellescape(record)),
+    "exit 0",
+  }, bin .. "/scp")
+  vim.uv.fs_chmod(bin .. "/scp", tonumber("755", 8))
+
+  local original = vim.env.PATH
+  vim.env.PATH = bin .. ":" .. original
+
+  local function next_call(trigger)
+    vim.fn.delete(record)
+    trigger()
+    local ran = vim.wait(3000, function()
+      return vim.fn.filereadable(record) == 1 and vim.fn.readfile(record)[#vim.fn.readfile(record)] == "=="
+    end)
+    if not ran then
+      return nil
+    end
+    local argv = vim.fn.readfile(record)
+    argv[#argv] = nil
+    return argv
+  end
+
+  local function never_runs(trigger)
+    vim.fn.delete(record)
+    trigger()
+    vim.wait(400, function()
+      return vim.fn.filereadable(record) == 1
+    end)
+    return vim.fn.filereadable(record) == 0
+  end
+
+  return next_call, never_runs, function()
+    vim.env.PATH = original
+  end
+end
+
+test(":Ssh upload and :Ssh download drive scp with the right arguments", function()
+  local dialog = require("ssh_launcher.ui.dialog")
+  local next_call, never_runs, restore = fake_scp()
+  configure({ terminal = { start_insert = false } })
+  reset_store()
+  store.add({ name = "box", host = "10.0.0.5", user = "me", remote_dir = "/srv/app" })
+  store.add({ name = "prod-box", host = "10.0.0.6", user = "me", tags = { "prod" } })
+
+  local up = TMP .. "/e2e-up"
+  vim.fn.mkdir(up .. "/tree", "p")
+  vim.fn.writefile({ "a" }, up .. "/a.txt")
+  vim.fn.writefile({ "b" }, up .. "/b.txt")
+  vim.fn.writefile({ "s" }, up .. "/sp ace.txt")
+  vim.fn.writefile({ "t" }, up .. "/tree/t.txt")
+
+  -- One path: it lands in the host's landing directory.
+  local argv = next_call(function()
+    vim.cmd("Ssh upload box " .. up .. "/a.txt")
+  end)
+  truthy(argv, "scp should have run")
+  eq(argv[#argv], "me@10.0.0.5:/srv/app/", "the default destination is the landing directory")
+  eq(argv[#argv - 1], up .. "/a.txt")
+
+  -- Several paths, last one is the destination; a glob expands; a directory recurses.
+  argv = next_call(function()
+    vim.cmd(("Ssh upload box %s/*.txt %s/tree /tmp/in"):format(up, up))
+  end)
+  truthy(argv)
+  truthy(vim.tbl_contains(argv, "-r"), "a directory among the sources recurses")
+  eq(argv[#argv], "me@10.0.0.5:/tmp/in")
+  truthy(vim.tbl_contains(argv, up .. "/b.txt"), "the glob expanded: " .. vim.inspect(argv))
+  truthy(vim.tbl_contains(argv, up .. "/tree"))
+
+  -- A backslash-escaped space is one argument.
+  argv = next_call(function()
+    vim.cmd(("Ssh upload box %s/sp\\ ace.txt /tmp/"):format(up))
+  end)
+  truthy(argv)
+  eq(argv[#argv - 1], up .. "/sp ace.txt")
+
+  -- A typo is caught before scp starts.
+  truthy(
+    never_runs(function()
+      vim.cmd("Ssh upload box " .. up .. "/missing.txt")
+    end),
+    "a missing file must not start scp"
+  )
+  truthy(
+    never_runs(function()
+      vim.cmd("Ssh upload nosuchhost " .. up .. "/a.txt")
+    end),
+    "an unknown host must not start scp"
+  )
+
+  -- Production asks first, and declining sends nothing.
+  local original = dialog.confirm
+  local asked
+  dialog.confirm = function(opts, cb)
+    asked = opts
+    cb(false)
+  end
+  truthy(
+    never_runs(function()
+      vim.cmd("Ssh upload prod-box " .. up .. "/a.txt")
+    end),
+    "declining the production prompt sends nothing"
+  )
+  truthy(asked and asked.destructive, "the production prompt is a destructive confirmation")
+  contains(asked.lines, "10.0.0.6")
+
+  dialog.confirm = function(_, cb)
+    cb(true)
+  end
+  truthy(
+    next_call(function()
+      vim.cmd("Ssh upload prod-box " .. up .. "/a.txt")
+    end),
+    "accepting it sends the file"
+  )
+
+  -- The bang form skips the prompt.
+  asked = nil
+  dialog.confirm = function(opts, cb)
+    asked = opts
+    cb(false)
+  end
+  truthy(
+    next_call(function()
+      vim.cmd("Ssh! upload prod-box " .. up .. "/a.txt")
+    end),
+    ":Ssh! should not ask"
+  )
+  falsy(asked, "no prompt with a bang")
+
+  -- Downloads: into the current directory by default, into a directory, or to a name.
+  local down = TMP .. "/e2e-down"
+  vim.fn.mkdir(down, "p")
+  local previous = vim.fn.getcwd()
+  vim.cmd("cd " .. vim.fn.fnameescape(down))
+
+  argv = next_call(function()
+    vim.cmd("Ssh download box /var/log/app.log")
+  end)
+  truthy(argv)
+  truthy(vim.tbl_contains(argv, "-r"), "a download may be a directory")
+  eq(argv[#argv - 1], "me@10.0.0.5:/var/log/app.log")
+  eq(argv[#argv], vim.fn.getcwd(), "no destination means the current directory")
+  eq(vim.uv.fs_realpath(argv[#argv]), vim.uv.fs_realpath(down))
+
+  argv = next_call(function()
+    vim.cmd(("Ssh download box /etc/hosts %s/hosts.copy"):format(down))
+  end)
+  eq(argv[#argv], down .. "/hosts.copy")
+
+  truthy(
+    never_runs(function()
+      vim.cmd("Ssh download box /etc/hosts " .. down .. "/no/such/dir/hosts")
+    end),
+    "a missing destination directory is caught up front"
+  )
+  truthy(
+    never_runs(function()
+      vim.cmd("Ssh download box a b c")
+    end),
+    "too many arguments is a usage error"
+  )
+
+  -- Nothing local is overwritten silently.
+  vim.fn.writefile({ "mine" }, down .. "/app.log")
+  asked = nil
+  dialog.confirm = function(opts, cb)
+    asked = opts
+    cb(false)
+  end
+  truthy(
+    never_runs(function()
+      vim.cmd("Ssh download box /var/log/app.log")
+    end),
+    "declining the overwrite prompt fetches nothing"
+  )
+  truthy(asked, "an existing file prompts")
+  contains(asked.lines, down .. "/app.log")
+  eq(vim.fn.readfile(down .. "/app.log"), { "mine" })
+
+  dialog.confirm = function(_, cb)
+    cb(true)
+  end
+  truthy(
+    next_call(function()
+      vim.cmd("Ssh download box /var/log/app.log")
+    end),
+    "agreeing fetches it"
+  )
+
+  asked = nil
+  dialog.confirm = function(opts, cb)
+    asked = opts
+    cb(false)
+  end
+  truthy(
+    next_call(function()
+      vim.cmd("Ssh! download box /var/log/app.log")
+    end),
+    ":Ssh! overwrites without asking"
+  )
+  falsy(asked)
+
+  -- The result reaches the caller.
+  dialog.confirm = original
+  local result
+  require("ssh_launcher.transfer").upload(store.get_by_name("box"), { up .. "/a.txt" }, "/tmp/", {
+    on_done = function(ok, msg)
+      result = { ok = ok, msg = msg }
+    end,
+  })
+  vim.wait(3000, function()
+    return result ~= nil
+  end)
+  truthy(result and result.ok, "on_done reports success")
+  contains(result.msg, "uploaded a.txt to box:/tmp/")
+
+  vim.cmd("cd " .. vim.fn.fnameescape(previous))
+  dialog.confirm = original
+  restore()
+  vim.cmd("silent! only")
+  configure()
+end)
+
+test(":Ssh upload and :Ssh download complete hosts, then local paths", function()
+  local ssh = require("ssh_launcher")
+  reset_store()
+  store.add({ name = "box", host = "10.0.0.5", user = "me" })
+  store.add({ name = "my box", host = "10.0.0.7", user = "me" })
+
+  local dir = TMP .. "/complete"
+  vim.fn.mkdir(dir, "p")
+  vim.fn.writefile({ "1" }, dir .. "/alpha.txt")
+  vim.fn.writefile({ "2" }, dir .. "/sp ace.txt")
+
+  truthy(vim.tbl_contains(ssh._complete("", "Ssh upload "), "box"), "the first argument is a host")
+  truthy(vim.tbl_contains(ssh._complete("", "Ssh download "), "box"))
+  truthy(vim.tbl_contains(ssh._subcommands(), "upload"))
+  truthy(vim.tbl_contains(ssh._subcommands(), "download"))
+
+  local after_host = ssh._complete(dir .. "/", "Ssh upload box " .. dir .. "/")
+  truthy(vim.tbl_contains(after_host, dir .. "/alpha.txt"), vim.inspect(after_host))
+  truthy(vim.tbl_contains(after_host, dir .. "/sp\\ ace.txt"), "a space is escaped so it stays one argument")
+
+  -- Every further upload argument is local too.
+  truthy(#ssh._complete(dir .. "/", ("Ssh upload box %s/alpha.txt %s/"):format(dir, dir)) >= 2)
+
+  -- A download names a remote path first; that cannot be completed locally.
+  eq(ssh._complete("/va", "Ssh download box /va"), {}, "remote paths are not completed")
+  truthy(#ssh._complete(dir .. "/", ("Ssh download box /var/log/x %s/"):format(dir)) >= 2, "then a local destination")
 end)
 
 test("commands and completion work through the user-command layer", function()

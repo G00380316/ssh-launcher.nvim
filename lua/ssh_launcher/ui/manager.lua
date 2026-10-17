@@ -1178,7 +1178,7 @@ function Manager:transfer(direction)
   if not h then
     return
   end
-  require("ssh_launcher.remote").prompt_transfer(h, direction)
+  require("ssh_launcher.transfer").prompt(h, direction)
 end
 
 --- Remove a host's entry from known_hosts.

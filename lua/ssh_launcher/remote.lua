@@ -3,7 +3,8 @@
 --- Browsing, editing and transferring files on a saved host. The built-in
 --- adapter uses the same identity, jump host, port and ssh options as terminal
 --- sessions. Oil and netrw remain available for users who prefer their native
---- remote adapters.
+--- remote adapters. The scp layer at the bottom is what |ssh_launcher.transfer|
+--- drives for `:Ssh upload` and `:Ssh download`.
 
 local util = require("ssh_launcher.util")
 local log = require("ssh_launcher.log")
@@ -348,56 +349,105 @@ local function scp_prefix(h)
   return argv
 end
 
+--- A local path in the form scp can only read as a file. scp decides a
+--- name is remote when a colon appears before the first slash, so `a:b` would
+--- be sent to host `a`; a leading `./` removes the ambiguity.
+---@param path string
+---@return string
+local function local_operand(path)
+  local expanded = util.expand(path)
+  if expanded:find("^[^/]*:") then
+    return "./" .. expanded
+  end
+  return expanded
+end
+
 --- The scp argv for a transfer. Every path is its own element, so a filename
 --- containing a space, a quote or a semicolon is data rather than syntax.
+---
+--- Uploads recurse only when something being sent is a directory. Downloads
+--- always recurse: the remote side cannot be inspected cheaply, and `-r` is
+--- harmless on a single file.
 ---@param direction "get"|"put"
 ---@param h ssh_launcher.Host
 ---@param remote_path string
----@param local_path string
+---@param local_paths string|string[]
 ---@return string[]
-function M.scp_argv(direction, h, remote_path, local_path)
+function M.scp_argv(direction, h, remote_path, local_paths)
+  local sources = type(local_paths) == "table" and local_paths or { local_paths }
   local argv = scp_prefix(h)
   argv[#argv + 1] = "-p" -- keep timestamps and mode
-  local remote = ("%s:%s"):format(authority(h), remote_path)
 
+  local recursive = direction == "get"
+  for _, path in ipairs(sources) do
+    recursive = recursive or util.is_dir(path)
+  end
+  if recursive then
+    argv[#argv + 1] = "-r"
+  end
+  -- Nothing after this can be mistaken for an option, whatever it is named.
+  argv[#argv + 1] = "--"
+
+  local remote = ("%s:%s"):format(authority(h), remote_path)
   if direction == "get" then
     argv[#argv + 1] = remote
-    argv[#argv + 1] = util.expand(local_path)
+    argv[#argv + 1] = local_operand(sources[1])
   else
-    argv[#argv + 1] = util.expand(local_path)
+    for _, path in ipairs(sources) do
+      argv[#argv + 1] = local_operand(path)
+    end
     argv[#argv + 1] = remote
   end
   return argv
 end
 
+---@param paths string[]
+---@return string
+local function describe_sources(paths)
+  if #paths == 1 then
+    return util.basename(paths[1])
+  end
+  return ("%d items"):format(#paths)
+end
+
 ---@param direction "get"|"put"
 ---@param h ssh_launcher.Host
 ---@param remote_path string
----@param local_path string
+---@param local_paths string|string[]
 ---@param cb fun(ok: boolean, msg: string)|nil
-local function transfer(direction, h, remote_path, local_path, cb)
+local function transfer(direction, h, remote_path, local_paths, cb)
   cb = cb or function() end
+  local sources = type(local_paths) == "table" and local_paths or { local_paths }
 
   if not util.has_executable("scp") then
     return cb(false, "scp is not installed")
   end
-  if util.blank(remote_path) or util.blank(local_path) then
+  if util.blank(remote_path) or #sources == 0 or util.blank(sources[1]) then
     return cb(false, "both a remote and a local path are needed")
   end
+  if direction == "get" and #sources > 1 then
+    return cb(false, "a download has exactly one local destination")
+  end
 
-  local argv = M.scp_argv(direction, h, remote_path, local_path)
+  local argv = M.scp_argv(direction, h, remote_path, sources)
+  local label = Host.label(h)
 
   -- scp may need a passphrase and prints progress, so it runs in a terminal
   -- rather than being swallowed by a background job.
   require("ssh_launcher.terminal").run(argv, {
-    title = ("scp %s %s"):format(direction, Host.label(h)),
+    title = ("scp %s %s"):format(direction, label),
     strategy = "float",
     width = 0.7,
     height = 12,
     close_on_exit = true,
     on_exit = function(code)
       if code == 0 then
-        local msg = direction == "get" and ("fetched %s"):format(remote_path) or ("uploaded to %s"):format(remote_path)
+        local msg
+        if direction == "get" then
+          msg = ("downloaded %s:%s to %s"):format(label, remote_path, util.contract(util.expand(sources[1])))
+        else
+          msg = ("uploaded %s to %s:%s"):format(describe_sources(sources), label, remote_path)
+        end
         log.info(msg)
         cb(true, msg)
       else
@@ -407,7 +457,7 @@ local function transfer(direction, h, remote_path, local_path, cb)
   })
 end
 
---- Copy a file down from the host.
+--- Copy a file or directory down from the host.
 ---@param h ssh_launcher.Host
 ---@param remote_path string
 ---@param local_path string
@@ -416,49 +466,14 @@ function M.get(h, remote_path, local_path, cb)
   transfer("get", h, remote_path, local_path, cb)
 end
 
---- Copy a file up to the host.
+--- Copy files or directories up to the host. With several sources the remote
+--- path is a directory; current scp creates it if missing, older ones refuse.
 ---@param h ssh_launcher.Host
----@param local_path string
+---@param local_paths string|string[]
 ---@param remote_path string
 ---@param cb fun(ok: boolean, msg: string)|nil
-function M.put(h, local_path, remote_path, cb)
-  transfer("put", h, remote_path, local_path, cb)
-end
-
---- Ask for the two paths, then transfer. Defaults are chosen so the common
---- case — send the file I am editing — is two keystrokes.
----@param h ssh_launcher.Host
----@param direction "get"|"put"
-function M.prompt_transfer(h, direction)
-  local dialog = require("ssh_launcher.ui.dialog")
-  local current = vim.api.nvim_buf_get_name(0)
-  local base = current ~= "" and util.basename(current) or ""
-  local remote_default = util.join(h.remote_dir or ".", base)
-
-  if direction == "put" then
-    dialog.input({ prompt = "Local file: ", default = current, completion = "file" }, function(local_path)
-      if not local_path then
-        return
-      end
-      dialog.input({ prompt = ("Copy to %s: "):format(Host.label(h)), default = remote_default }, function(remote_path)
-        if remote_path then
-          M.put(h, local_path, remote_path)
-        end
-      end)
-    end)
-  else
-    dialog.input({ prompt = ("Fetch from %s: "):format(Host.label(h)), default = remote_default }, function(remote_path)
-      if not remote_path then
-        return
-      end
-      local suggestion = util.join(vim.fn.getcwd(), util.basename(remote_path))
-      dialog.input({ prompt = "Save as: ", default = suggestion, completion = "file" }, function(local_path)
-        if local_path then
-          M.get(h, remote_path, local_path)
-        end
-      end)
-    end)
-  end
+function M.put(h, local_paths, remote_path, cb)
+  transfer("put", h, remote_path, local_paths, cb)
 end
 
 return M
