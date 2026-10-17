@@ -3,7 +3,8 @@
 --- Browsing, editing and transferring files on a saved host. The built-in
 --- adapter uses the same identity, jump host, port and ssh options as terminal
 --- sessions. Oil and netrw remain available for users who prefer their native
---- remote adapters.
+--- remote adapters. The scp layer at the bottom is what |ssh_launcher.transfer|
+--- drives for `:Ssh upload` and `:Ssh download`.
 
 local util = require("ssh_launcher.util")
 local log = require("ssh_launcher.log")
@@ -70,13 +71,18 @@ end
 
 --- Build an unattended SSH command without inheriting an interactive host's
 --- landing command, TTY, forwards or agent forwarding.
+--- The scripts here are POSIX `sh`, but ssh hands a command to the account's
+--- *login* shell, which is often zsh, fish or bash with its own rules. zsh turns
+--- an unmatched glob into a fatal error and ties `path` to `$PATH`, so the same
+--- text that lists a directory under `sh` fails — or loses `cat` — under zsh.
+--- Handing the login shell a one-line `exec sh -c` means it never parses ours.
 ---@param h ssh_launcher.Host
 ---@param command string
 ---@return string[]
 function M.command_argv(h, command)
   local command_host = vim.deepcopy(h)
   command_host.remote_dir = nil
-  command_host.remote_command = command
+  command_host.remote_command = "exec sh -c " .. M.shell_quote(command)
   command_host.request_tty = false
   command_host.forwards = {}
   command_host.forward_agent = false
@@ -96,9 +102,21 @@ end
 --- The portable directory script intentionally uses shell tests instead of
 --- `find -printf`: the latter is absent on BSD/macOS hosts. Its NUL-separated
 --- protocol preserves spaces, tabs and newlines in filenames.
+---
+--- With `detailed`, each entry also carries `size mtime` from whichever of GNU
+--- (`stat -c`) or BSD (`stat -f`) `stat` the host has; a host with neither, or
+--- an entry that cannot be statted, simply has no metadata.
 ---@param path string
+---@param detailed boolean|nil
 ---@return string
-function M.list_command(path)
+function M.list_command(path, detailed)
+  local emit = [[  printf '%s\000%s\000' "$kind" "$entry"]]
+  if detailed then
+    emit = table.concat({
+      [[  meta=$(stat -L -c '%s %Y' -- "./$entry" 2>/dev/null || stat -L -f '%z %m' -- "./$entry" 2>/dev/null || true)]],
+      [[  printf '%s\000%s\000%s\000' "$kind" "$meta" "$entry"]],
+    }, "\n")
+  end
   return table.concat({
     "path=" .. M.shell_quote(path),
     [[case "$path" in '~') path=$HOME ;; '~/'*) path="$HOME/${path#\~/}" ;; -*) path="./$path" ;; esac]],
@@ -107,7 +125,7 @@ function M.list_command(path)
     [[for entry in .[!.]* ..?* *; do]],
     [[  { [ -e "$entry" ] || [ -L "$entry" ]; } || continue]],
     [[  if [ -d "$entry" ]; then kind=d; elif [ -f "$entry" ]; then kind=f; elif [ -L "$entry" ]; then kind=l; else kind=o; fi]],
-    [[  printf '%s\000%s\000' "$kind" "$entry"]],
+    emit,
     [[done]],
   }, "\n")
 end
@@ -115,12 +133,16 @@ end
 ---@class ssh_launcher.RemoteEntry
 ---@field name string
 ---@field type "directory"|"file"|"link"|"other"
+---@field size integer|nil bytes, in detailed listings
+---@field mtime integer|nil seconds since the epoch, in detailed listings
 
 --- Decode the private NUL-separated listing protocol.
 ---@param output string
+---@param detailed boolean|nil the output came from `list_command(path, true)`
 ---@return string|nil path, ssh_launcher.RemoteEntry[]|nil entries, string|nil err
-function M.parse_listing(output)
+function M.parse_listing(output, detailed)
   output = output or ""
+  local stride = detailed and 3 or 2
   local fields, from = {}, 1
   while from <= #output do
     local stop = output:find("\0", from, true)
@@ -134,14 +156,21 @@ function M.parse_listing(output)
   if util.blank(path) then
     return nil, nil, "the host returned an invalid directory listing"
   end
-  if #fields % 2 ~= 0 then
+  if #fields % stride ~= 0 then
     return nil, nil, "the host returned a truncated directory listing"
   end
 
   local kinds = { d = "directory", f = "file", l = "link", o = "other" }
   local entries = {}
-  for i = 1, #fields, 2 do
-    entries[#entries + 1] = { type = kinds[fields[i]] or "other", name = fields[i + 1] }
+  for i = 1, #fields, stride do
+    local entry = { type = kinds[fields[i]] or "other", name = fields[i + stride - 1] }
+    if detailed then
+      -- Anything that is not exactly "<bytes> <epoch>" means the host's stat
+      -- spoke a dialect we did not expect; no metadata beats wrong metadata.
+      local size, mtime = fields[i + 1]:match("^(%d+) (%d+)$")
+      entry.size, entry.mtime = tonumber(size), tonumber(mtime)
+    end
+    entries[#entries + 1] = entry
   end
   table.sort(entries, function(a, b)
     if (a.type == "directory") ~= (b.type == "directory") then
@@ -164,14 +193,43 @@ end
 ---@param h ssh_launcher.Host
 ---@param path string
 ---@param cb fun(path: string|nil, entries: ssh_launcher.RemoteEntry[]|nil, err: string|nil)
-function M.list(h, path, cb)
-  run(h, M.list_command(path), { text = false }, function(res)
+---@param opts { detailed: boolean|nil }|nil `detailed` adds size and mtime
+function M.list(h, path, cb, opts)
+  local detailed = opts and opts.detailed
+  run(h, M.list_command(path, detailed), { text = false }, function(res)
     if not res.ok then
       return cb(nil, nil, result_error(res, "could not list the remote directory"))
     end
-    local resolved, entries, err = M.parse_listing(res.stdout)
+    local resolved, entries, err = M.parse_listing(res.stdout, detailed)
     cb(resolved, entries, err)
   end)
+end
+
+--- Create a directory (and any missing parents) on the host.
+---@param h ssh_launcher.Host
+---@param path string
+---@param cb fun(ok: boolean, err: string|nil)
+function M.mkdir(h, path, cb)
+  local command = table.concat({
+    "path=" .. M.shell_quote(path),
+    [[case "$path" in '~') path=$HOME ;; '~/'*) path="$HOME/${path#\~/}" ;; -*) path="./$path" ;; esac]],
+    [[mkdir -p "$path"]],
+  }, "; ")
+  run(h, command, nil, function(res)
+    if res.ok then
+      cb(true, nil)
+    else
+      cb(false, result_error(res, "could not create the remote directory"))
+    end
+  end)
+end
+
+--- Escape the characters scp would otherwise read as a glob in a remote path
+--- that is a literal name — a file called `report[1].txt` or `*`.
+---@param path string
+---@return string
+function M.glob_escape(path)
+  return (path:gsub("[%*%?%[%]\\]", "\\%0"))
 end
 
 --- Read a remote file as bytes. The UI decides whether those bytes are safe to
@@ -272,6 +330,14 @@ local function with_auth(h, proceed)
   end)
 end
 
+--- Make sure background SSH commands can authenticate, offering to load a
+--- locked key into ssh-agent first. `proceed` runs once that is settled.
+---@param h ssh_launcher.Host
+---@param proceed fun()
+function M.with_auth(h, proceed)
+  with_auth(h, proceed)
+end
+
 --- Open a remote directory for browsing.
 ---@param h ssh_launcher.Host
 ---@param path string|nil defaults to the host's remote_dir, then the home dir
@@ -319,10 +385,19 @@ function M.browse(h, path)
 end
 
 ---@param h ssh_launcher.Host
+---@param batch boolean|nil never prompt, and give up on a dead connection
 ---@return string[] argv prefix carrying this host's port and identity
-local function scp_prefix(h)
+local function scp_prefix(h, batch)
   local cfg = require("ssh_launcher.config").get()
   local argv = { "scp" }
+  if batch then
+    -- A transfer nobody is watching must fail rather than wait on a prompt or
+    -- a connection that has silently gone away.
+    for _, option in ipairs({ "BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=4" }) do
+      argv[#argv + 1] = "-o"
+      argv[#argv + 1] = option
+    end
+  end
   if h.port and h.port ~= 22 then
     argv[#argv + 1] = "-P" -- scp spells it with a capital
     argv[#argv + 1] = tostring(h.port)
@@ -345,59 +420,178 @@ local function scp_prefix(h)
   end
   argv[#argv + 1] = "-o"
   argv[#argv + 1] = ("StrictHostKeyChecking=%s"):format(strict)
+
+  -- The same compression and `-o` options a session on this host would use, so
+  -- a transfer behaves like the terminal it came from. ssh keeps the first
+  -- value it sees for an option, which is why the options above win.
+  local compression = h.compression
+  if compression == nil then
+    compression = cfg.ssh.compression
+  end
+  if compression then
+    argv[#argv + 1] = "-C"
+  end
+  for _, options in ipairs({ cfg.ssh.default_options or {}, h.options or {} }) do
+    for key, value in pairs(options) do
+      argv[#argv + 1] = "-o"
+      argv[#argv + 1] = ("%s=%s"):format(key, value)
+    end
+  end
   return argv
+end
+
+--- A local path in the form scp can only read as a file. scp decides a
+--- name is remote when a colon appears before the first slash, so `a:b` would
+--- be sent to host `a`; a leading `./` removes the ambiguity.
+---@param path string
+---@return string
+local function local_operand(path)
+  local expanded = util.expand(path)
+  if expanded:find("^[^/]*:") then
+    return "./" .. expanded
+  end
+  return expanded
 end
 
 --- The scp argv for a transfer. Every path is its own element, so a filename
 --- containing a space, a quote or a semicolon is data rather than syntax.
+---
+--- Uploads recurse only when something being sent is a directory. Downloads
+--- always recurse: the remote side cannot be inspected cheaply, and `-r` is
+--- harmless on a single file.
 ---@param direction "get"|"put"
 ---@param h ssh_launcher.Host
----@param remote_path string
----@param local_path string
+---@param remote_path string|string[] a download may name several remote paths
+---@param local_paths string|string[]
+---@param opts { batch: boolean|nil }|nil
 ---@return string[]
-function M.scp_argv(direction, h, remote_path, local_path)
-  local argv = scp_prefix(h)
+function M.scp_argv(direction, h, remote_path, local_paths, opts)
+  local sources = type(local_paths) == "table" and local_paths or { local_paths }
+  local argv = scp_prefix(h, opts and opts.batch)
   argv[#argv + 1] = "-p" -- keep timestamps and mode
-  local remote = ("%s:%s"):format(authority(h), remote_path)
 
+  local recursive = direction == "get"
+  for _, path in ipairs(sources) do
+    recursive = recursive or util.is_dir(path)
+  end
+  if recursive then
+    argv[#argv + 1] = "-r"
+  end
+  -- Nothing after this can be mistaken for an option, whatever it is named.
+  argv[#argv + 1] = "--"
+
+  local target = authority(h)
   if direction == "get" then
-    argv[#argv + 1] = remote
-    argv[#argv + 1] = util.expand(local_path)
+    for _, path in ipairs(type(remote_path) == "table" and remote_path or { remote_path }) do
+      argv[#argv + 1] = ("%s:%s"):format(target, path)
+    end
+    argv[#argv + 1] = local_operand(sources[1])
   else
-    argv[#argv + 1] = util.expand(local_path)
-    argv[#argv + 1] = remote
+    for _, path in ipairs(sources) do
+      argv[#argv + 1] = local_operand(path)
+    end
+    argv[#argv + 1] = ("%s:%s"):format(target, remote_path)
   end
   return argv
+end
+
+--- Copy in the background, for an interface that shows its own progress.
+---
+--- Unlike |ssh_launcher.remote.put| and |ssh_launcher.remote.get| this opens no
+--- terminal, so it cannot ask for a passphrase: the key must already be usable
+--- (see |ssh_launcher.remote.with_auth|). Returns a handle whose `cancel()`
+--- stops the transfer; `cb` then reports `"cancelled"`.
+---@param direction "get"|"put"
+---@param h ssh_launcher.Host
+---@param remote_path string|string[] the destination for a put, the sources for a get
+---@param local_paths string|string[] the sources for a put, the destination for a get
+---@param cb fun(ok: boolean, err: string|nil)
+---@return { cancel: fun() }
+function M.copy(direction, h, remote_path, local_paths, cb)
+  local handle = { cancel = function() end }
+  if not util.has_executable("scp") then
+    vim.schedule(function()
+      cb(false, "scp is not installed")
+    end)
+    return handle
+  end
+
+  local cancelled = false
+  local argv = M.scp_argv(direction, h, remote_path, local_paths, { batch = true })
+  local started, proc = pcall(vim.system, argv, { text = true }, function(res)
+    vim.schedule(function()
+      if cancelled then
+        cb(false, "cancelled")
+      elseif res.code == 0 then
+        cb(true, nil)
+      else
+        cb(false, result_error(res, "scp failed"))
+      end
+    end)
+  end)
+  if not started then
+    vim.schedule(function()
+      cb(false, tostring(proc))
+    end)
+    return handle
+  end
+
+  handle.cancel = function()
+    cancelled = true
+    pcall(function()
+      proc:kill(15)
+    end)
+  end
+  return handle
+end
+
+---@param paths string[]
+---@return string
+local function describe_sources(paths)
+  if #paths == 1 then
+    return util.basename(paths[1])
+  end
+  return ("%d items"):format(#paths)
 end
 
 ---@param direction "get"|"put"
 ---@param h ssh_launcher.Host
 ---@param remote_path string
----@param local_path string
+---@param local_paths string|string[]
 ---@param cb fun(ok: boolean, msg: string)|nil
-local function transfer(direction, h, remote_path, local_path, cb)
+local function transfer(direction, h, remote_path, local_paths, cb)
   cb = cb or function() end
+  local sources = type(local_paths) == "table" and local_paths or { local_paths }
 
   if not util.has_executable("scp") then
     return cb(false, "scp is not installed")
   end
-  if util.blank(remote_path) or util.blank(local_path) then
+  if util.blank(remote_path) or #sources == 0 or util.blank(sources[1]) then
     return cb(false, "both a remote and a local path are needed")
   end
+  if direction == "get" and #sources > 1 then
+    return cb(false, "a download has exactly one local destination")
+  end
 
-  local argv = M.scp_argv(direction, h, remote_path, local_path)
+  local argv = M.scp_argv(direction, h, remote_path, sources)
+  local label = Host.label(h)
 
   -- scp may need a passphrase and prints progress, so it runs in a terminal
   -- rather than being swallowed by a background job.
   require("ssh_launcher.terminal").run(argv, {
-    title = ("scp %s %s"):format(direction, Host.label(h)),
+    title = ("scp %s %s"):format(direction, label),
     strategy = "float",
     width = 0.7,
     height = 12,
     close_on_exit = true,
     on_exit = function(code)
       if code == 0 then
-        local msg = direction == "get" and ("fetched %s"):format(remote_path) or ("uploaded to %s"):format(remote_path)
+        local msg
+        if direction == "get" then
+          msg = ("downloaded %s:%s to %s"):format(label, remote_path, util.contract(util.expand(sources[1])))
+        else
+          msg = ("uploaded %s to %s:%s"):format(describe_sources(sources), label, remote_path)
+        end
         log.info(msg)
         cb(true, msg)
       else
@@ -407,7 +601,7 @@ local function transfer(direction, h, remote_path, local_path, cb)
   })
 end
 
---- Copy a file down from the host.
+--- Copy a file or directory down from the host.
 ---@param h ssh_launcher.Host
 ---@param remote_path string
 ---@param local_path string
@@ -416,49 +610,14 @@ function M.get(h, remote_path, local_path, cb)
   transfer("get", h, remote_path, local_path, cb)
 end
 
---- Copy a file up to the host.
+--- Copy files or directories up to the host. With several sources the remote
+--- path is a directory; current scp creates it if missing, older ones refuse.
 ---@param h ssh_launcher.Host
----@param local_path string
+---@param local_paths string|string[]
 ---@param remote_path string
 ---@param cb fun(ok: boolean, msg: string)|nil
-function M.put(h, local_path, remote_path, cb)
-  transfer("put", h, remote_path, local_path, cb)
-end
-
---- Ask for the two paths, then transfer. Defaults are chosen so the common
---- case — send the file I am editing — is two keystrokes.
----@param h ssh_launcher.Host
----@param direction "get"|"put"
-function M.prompt_transfer(h, direction)
-  local dialog = require("ssh_launcher.ui.dialog")
-  local current = vim.api.nvim_buf_get_name(0)
-  local base = current ~= "" and util.basename(current) or ""
-  local remote_default = util.join(h.remote_dir or ".", base)
-
-  if direction == "put" then
-    dialog.input({ prompt = "Local file: ", default = current, completion = "file" }, function(local_path)
-      if not local_path then
-        return
-      end
-      dialog.input({ prompt = ("Copy to %s: "):format(Host.label(h)), default = remote_default }, function(remote_path)
-        if remote_path then
-          M.put(h, local_path, remote_path)
-        end
-      end)
-    end)
-  else
-    dialog.input({ prompt = ("Fetch from %s: "):format(Host.label(h)), default = remote_default }, function(remote_path)
-      if not remote_path then
-        return
-      end
-      local suggestion = util.join(vim.fn.getcwd(), util.basename(remote_path))
-      dialog.input({ prompt = "Save as: ", default = suggestion, completion = "file" }, function(local_path)
-        if local_path then
-          M.get(h, remote_path, local_path)
-        end
-      end)
-    end)
-  end
+function M.put(h, local_paths, remote_path, cb)
+  transfer("put", h, remote_path, local_paths, cb)
 end
 
 return M

@@ -71,8 +71,13 @@ forwarding off by default, and never writes key material anywhere.
   them with bounded concurrency and per-host exit status.
 - **Remote workspace** — `b` opens a built-in SSH file browser using the saved
   port, key, jump host and options. Open a text file, edit normally, and `:write`
-  saves it back atomically. oil.nvim/netrw remain optional adapters; `U`/`W`
-  handle explicit uploads and downloads.
+  saves it back atomically. oil.nvim/netrw remain optional adapters;
+  `:Ssh upload`/`:Ssh download` (or `U`/`W`) move files and directories.
+- **Two-pane transfer** — `T` (or `:Ssh transfer`) shows this machine beside
+  the host, with sizes and dates. Select with `<Space>`, press `c`, and the
+  files go to whichever directory the *other* pane is showing — an upload from
+  the left, a download from the right. Transfers run in the background with a
+  live status line, a queue and cancel.
 - **Your Neovim on the server** — `n` packages the configuration used by the
   current Neovim, sends it to a private session directory, and launches remote
   Neovim there. Plugins, LSPs, Git, searches and terminals then run entirely in
@@ -151,6 +156,9 @@ read-only. Press `i` to import them for editing.
 | `:Ssh agent` | Manage ssh-agent identities |
 | `:Ssh sessions` | Jump to a running session |
 | `:Ssh browse [name] [path]` | Browse and edit a host's files in the editor |
+| `:Ssh transfer [name] [path]` | Two panes: browse this machine and a host, copy across |
+| `:Ssh upload [name] {local}… [remote]` | Send files or directories to a host |
+| `:Ssh download [name] {remote} [local]` | Fetch a file or directory from a host |
 | `:Ssh workspace [name] [path]` | Launch remote Neovim with your local configuration |
 | `:Ssh tunnels [name]` | List tunnels, or raise/drop a host's forwards |
 | `:Ssh fleet <cmd>` | Run a command on every host (`--tag=prod` narrows it) |
@@ -161,13 +169,65 @@ read-only. Press `i` to import them for editing.
 
 `:SshLauncher`, `:SshAddKey` and `:SshEditKey` from 1.x still work.
 
+### Sending and fetching files
+
+```vim
+:Ssh upload web-01 %                          " the file you are editing
+:Ssh upload web-01 dist/ /srv/app/            " a directory, recursively
+:Ssh upload web-01 *.conf nginx.d /etc/nginx/ " several; the last is the destination
+:Ssh download web-01 /var/log/app.log         " into the current directory
+:Ssh download web-01 /var/log/app.log ~/logs/today.log
+```
+
+Omit the paths (or the host) and you are prompted, with the current file
+offered first. Uploads without a destination land in the host's *Remote dir*.
+`~`, `$VAR`, globs and `%` work locally; escape spaces as `my\ file.txt`. Tab
+completes host names, then local paths.
+
+Typos are caught before scp starts, uploads to `prod`-tagged hosts ask first,
+and a download never replaces a local file without asking. `:Ssh! …` skips
+those prompts. The manager's `U`/`W` use the same flow. See
+`:help ssh-launcher-transfer`.
+
+### Two-pane transfer
+
+`:Ssh transfer web-01` (or `T` on a host in the manager) when you would rather
+browse than type paths:
+
+```
+┌ > Local  ~/projects/site ─────────┐┌   web-01  /srv/app ───────────────┐
+│    ../                            ││    ../                            │
+│    docs/                          ││    backups/                       │
+│    dist/                          ││    logs/                          │
+│[x] index.html              12K    ││    index.html              11K    │
+│[x] app.js                 340K    ││    app.js                 338K    │
+│    README.md              1.2K    ││    server.conf            2.3K    │
+└─────────── 5 items · 2 selected ──┘└───────────────────────── 6 items ─┘
+ <Tab> switch   <Space> select   c copy   m mkdir   go path   ? help   q quit
+```
+
+`<Tab>` switches panes, `<Space>` selects, and `c` copies the selection (or the
+file under the cursor) into the directory the **other** pane is showing — so
+copying from the left pane uploads and from the right pane downloads, with no
+path to type. `m` makes a directory, `go` jumps to a typed path, `.` toggles
+dotfiles, `x` cancels. Existing files at the destination are listed and need a
+yes; production hosts ask before an upload.
+
+Copies run in the background: the status line shows what is moving and for how
+long, further copies queue behind it, and the destination pane refreshes when
+it finishes. Because nothing can answer a prompt there, a locked key is loaded
+into ssh-agent when the window opens; a password-only host should use
+`:Ssh upload`/`:Ssh download`. Every key is configurable under
+`commander.keymaps`. See `:help ssh-launcher-commander`.
+
 ## Keys
 
 In the manager: `<CR>` connect · `a` add · `p` paste-add · `e` edit · `d`
 delete · `<Space>` mark · `/` filter · `s` sort · `D` diagnose · `f` fix · `A`
 agent · `C` copy-id · `G` keygen · `K` forget host key · `L` tunnels · `!`
-fleet command · `b` browse · `n` configured remote Neovim · `U`/`W`
-upload/download · `i` import · `X` export · `S` sessions · `?` help.
+fleet command · `b` browse · `n` configured remote Neovim · `T` two-pane
+transfer · `U`/`W` upload/download · `i` import · `X` export · `S` sessions ·
+`?` help.
 
 In the editor: `<Tab>` next field · `<C-k>` pick a key · `<C-f>` fix
 everything · `<C-d>` explain this line · `gx` show the resolved command ·
