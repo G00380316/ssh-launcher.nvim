@@ -521,12 +521,23 @@ function M.copy(direction, h, remote_path, local_paths, cb)
   local started, proc = pcall(vim.system, argv, { text = true }, function(res)
     vim.schedule(function()
       if cancelled then
-        cb(false, "cancelled")
+        return cb(false, "cancelled")
       elseif res.code == 0 then
-        cb(true, nil)
-      else
-        cb(false, result_error(res, "scp failed"))
+        return cb(true, nil)
       end
+      local err = result_error(res, "scp failed")
+      if not M.is_permission_error(err) then
+        return cb(false, err)
+      end
+      M.offer_sudo(h, err, function()
+        if cancelled then
+          return cb(false, "cancelled")
+        end
+        -- The caller holds on to `handle`; cancelling it now stops the sudo copy.
+        handle.cancel = M.copy_elevated(direction, h, remote_path, local_paths, cb).cancel
+      end, function()
+        cb(false, err)
+      end)
     end)
   end)
   if not started then
@@ -543,6 +554,332 @@ function M.copy(direction, h, remote_path, local_paths, cb)
     end)
   end
   return handle
+end
+
+--------------------------------------------------------------------------------
+-- Protected paths
+--------------------------------------------------------------------------------
+
+--- The line in which scp was refused a file or directory, if it was. ssh being
+--- refused the login reads "Permission denied (publickey,password)" and is
+--- not this: sudo cannot help with that.
+---@param text string|nil
+---@return string|nil line
+function M.is_permission_error(text)
+  for line in tostring(text or ""):gmatch("[^\r\n]+") do
+    local _, stop = line:find("Permission denied", 1, true)
+    if (stop and not line:find("^%s*%(", stop + 1)) or line:find("Operation not permitted", 1, true) then
+      return util.trim(line)
+    end
+  end
+  return nil
+end
+
+--- A `case` line expanding `~` in the shell variable `var`, and keeping a
+--- leading `-` from being read as an option.
+---@param var string
+---@return string
+local function expand_var(var)
+  return (([[case "$V" in '~') V=$HOME ;; '~/'*) V="$HOME/${V#\~/}" ;; -*) V="./$V" ;; esac]]):gsub("V", var))
+end
+
+---@param password string|nil
+---@return string
+local function sudo(password)
+  -- `-n` fails at once rather than waiting on a prompt nobody can answer;
+  -- with a password, `-S` reads it from stdin and `-p ''` keeps it quiet.
+  return password and "sudo -S -p '' --" or "sudo -n --"
+end
+
+local STAGE = [[umask 077; d=$(mktemp -d "${TMPDIR:-/tmp}/ssh-launcher.XXXXXX") && printf '%s' "$d"]]
+
+--- Run as root: move staged uploads into place with scp's rules — into `dest`
+--- when it is a directory, otherwise as `dest` itself. A file that already
+--- exists is rewritten in place so it keeps its owner and mode; anything new
+--- belongs to root, as with `sudo cp`.
+local PLACE = table.concat({
+  "tmp=$1; dest=$2; shift 2",
+  [[if [ -d "$dest" ]; then into=1; else]],
+  [[  case "$dest" in */) printf '%s: No such directory\n' "$dest" >&2; exit 1 ;; esac]],
+  [[  [ $# -eq 1 ] || { printf '%s: Not a directory\n' "$dest" >&2; exit 1; }]],
+  [[  into=0]],
+  [[fi]],
+  [[for name; do]],
+  [[  src="$tmp/$name"]],
+  [[  if [ $into = 1 ]; then target="${dest%/}/$name"; else target=$dest; fi]],
+  [[  if [ -d "$src" ] && [ -d "$target" ]; then cp -R "$src/." "$target/" || exit 1]],
+  [[  elif [ -f "$src" ] && [ -f "$target" ]; then cat "$src" > "$target" || exit 1]],
+  [[  else cp -R "$src" "$target" || exit 1; fi]],
+  [[done]],
+}, "\n")
+
+--- Run as root: copy what each source matches into the staging directory,
+--- print the names, and hand the copies to the login user so scp can read them.
+--- A source is `L<path>` for a literal name or `G<pattern>` for a glob; shells
+--- disagree on backslash escapes in a pattern held in a variable, so escaped
+--- names are unescaped before they get here.
+local COLLECT = table.concat({
+  "tmp=$1; uid=$2; gid=$3; shift 3",
+  "IFS=",
+  [[for arg; do]],
+  [[  pattern=${arg#?}]],
+  [[  found=0]],
+  [[  case "$arg" in L*) set -f ;; *) set +f ;; esac]],
+  [[  for src in $pattern; do]],
+  [[    { [ -e "$src" ] || [ -L "$src" ]; } || continue]],
+  [[    found=1]],
+  [[    case "$src" in ?*/) src=${src%/} ;; esac]],
+  [[    name=${src##*/}]],
+  [[    cp -Rp "$src" "$tmp/$name" || exit 1]],
+  [[    printf '%s\000' "$name"]],
+  [[  done]],
+  [[  [ $found = 1 ] || { printf '%s: No such file or directory\n' "$pattern" >&2; exit 1; }]],
+  [[done]],
+  [[chown -R "$uid:$gid" "$tmp" && chmod -R u+rwX "$tmp"]],
+}, "\n")
+
+--- The remote command that puts staged `names` in `dest` as root.
+---@param tmp string staging directory
+---@param dest string
+---@param names string[]
+---@param password string|nil
+---@return string
+function M.place_command(tmp, dest, names, password)
+  local args = { M.shell_quote(tmp), '"$dest"' }
+  for _, name in ipairs(names) do
+    args[#args + 1] = M.shell_quote(name)
+  end
+  return table.concat({
+    "dest=" .. M.shell_quote(dest),
+    expand_var("dest"),
+    ("%s sh -c %s sh %s"):format(sudo(password), M.shell_quote(PLACE), table.concat(args, " ")),
+  }, "\n")
+end
+
+--- The remote command that stages `patterns` as root. Its output is the
+--- staging directory then each name, NUL-terminated.
+---@param patterns string[] scp-style remote paths; globs expand as root
+---@param password string|nil
+---@return string
+function M.collect_command(patterns, password)
+  local lines = {
+    "umask 077",
+    [[tmp=$(mktemp -d "${TMPDIR:-/tmp}/ssh-launcher.XXXXXX") || exit 1]],
+    "set --",
+  }
+  for _, pattern in ipairs(patterns) do
+    -- A glob character not escaped by |ssh_launcher.remote.glob_escape| makes it a pattern.
+    local is_glob = pattern:gsub("\\.", ""):find("[%*%?%[]") ~= nil
+    local value = is_glob and pattern or pattern:gsub("\\(.)", "%1")
+    lines[#lines + 1] = "p=" .. M.shell_quote(value)
+    lines[#lines + 1] = expand_var("p")
+    lines[#lines + 1] = ([[set -- "$@" "%s$p"]]):format(is_glob and "G" or "L")
+  end
+  lines[#lines + 1] = [[printf '%s\000' "$tmp"]]
+  lines[#lines + 1] = ([[%s sh -c %s sh "$tmp" "$(id -u)" "$(id -g)" "$@" || { rm -rf "$tmp"; exit 1; }]]):format(
+    sudo(password),
+    M.shell_quote(COLLECT)
+  )
+  return table.concat(lines, "\n")
+end
+
+---@param err string
+---@return boolean
+local function wants_password(err)
+  for _, needle in ipairs({ "password is required", "terminal is required", "no tty present", "askpass" }) do
+    if err:find(needle, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+--- Ask for the sudo password on a host. Replace it to use another secret
+--- prompt; `cb(nil)` means the user gave none. The password is never stored.
+---@param h ssh_launcher.Host
+---@param cb fun(password: string|nil)
+function M.ask_sudo_password(h, cb)
+  vim.schedule(function()
+    local ok, value = pcall(vim.fn.inputsecret, ("[sudo] password on %s: "):format(Host.label(h)))
+    cb((ok and value ~= "") and value or nil)
+  end)
+end
+
+---@param argv string[]
+---@param stdin string|nil
+---@param cb fun(ok: boolean, stdout: string, err: string)
+---@return vim.SystemObj|nil
+local function spawn(argv, stdin, cb)
+  local ok, proc = pcall(vim.system, argv, { text = false, stdin = stdin }, function(res)
+    vim.schedule(function()
+      cb(res.code == 0, res.stdout or "", result_error(res, "the command failed"))
+    end)
+  end)
+  if not ok then
+    vim.schedule(function()
+      cb(false, "", tostring(proc))
+    end)
+    return nil
+  end
+  return proc
+end
+
+--- Copy through sudo on the host, for paths the login user cannot write or
+--- read. scp cannot run as another user, so the files pass through a private
+--- staging directory the login user owns: an upload is copied there and put
+--- in place by root; a download is copied there by root, handed to the login
+--- user, and fetched. The staging directory is removed however it ends.
+---
+--- If sudo wants a password it is asked for once (|ssh_launcher.remote.ask_sudo_password|)
+--- and passed on stdin. Arguments are those of |ssh_launcher.remote.copy|.
+---@param direction "get"|"put"
+---@param h ssh_launcher.Host
+---@param remote_path string|string[]
+---@param local_paths string|string[]
+---@param cb fun(ok: boolean, err: string|nil)
+---@return { cancel: fun() }
+function M.copy_elevated(direction, h, remote_path, local_paths, cb)
+  local sources = type(local_paths) == "table" and local_paths or { local_paths }
+  local cancelled, proc, staged = false, nil, nil
+
+  local function done(ok, err)
+    local function report()
+      if cancelled then
+        return cb(false, "cancelled")
+      end
+      cb(ok, err)
+    end
+    if not staged then
+      return report()
+    end
+    -- Report once the staging directory is gone, so nothing is left behind
+    -- by the time anyone looks.
+    local dir = staged
+    staged = nil
+    spawn(M.command_argv(h, "rm -rf -- " .. M.shell_quote(dir)), nil, report)
+  end
+
+  local function step(argv, stdin, next_step)
+    if cancelled then
+      return done(false, "cancelled")
+    end
+    proc = spawn(argv, stdin, function(ok, stdout, err)
+      proc = nil
+      if cancelled then
+        return done(false, "cancelled")
+      end
+      next_step(ok, stdout, err)
+    end)
+  end
+
+  local function as_root(build, next_step, password)
+    step(M.command_argv(h, build(password)), password and (password .. "\n") or nil, function(ok, stdout, err)
+      if ok then
+        return next_step(stdout)
+      end
+      if not password and wants_password(err) then
+        return M.ask_sudo_password(h, function(given)
+          if not given then
+            return done(false, "sudo needs a password and none was given")
+          end
+          as_root(build, next_step, given)
+        end)
+      end
+      if password and (err:find("incorrect password", 1, true) or err:find("Sorry, try again", 1, true)) then
+        err = "sudo did not accept the password"
+      end
+      done(false, err)
+    end)
+  end
+
+  if direction == "put" then
+    step(M.command_argv(h, STAGE), nil, function(ok, stdout, err)
+      if not ok or util.blank(stdout) then
+        return done(false, ok and "could not make a staging directory on the host" or err)
+      end
+      staged = util.trim(stdout)
+      step(
+        M.scp_argv("put", h, M.glob_escape(staged) .. "/", sources, { batch = true }),
+        nil,
+        function(sent, _, scp_err)
+          if not sent then
+            return done(false, scp_err)
+          end
+          local names = {}
+          for _, path in ipairs(sources) do
+            names[#names + 1] = util.basename((path:gsub("/+$", "")))
+          end
+          as_root(function(password)
+            return M.place_command(staged, remote_path --[[@as string]], names, password)
+          end, function()
+            done(true, nil)
+          end)
+        end
+      )
+    end)
+  else
+    local patterns = type(remote_path) == "table" and remote_path or { remote_path }
+    as_root(function(password)
+      return M.collect_command(patterns, password)
+    end, function(stdout)
+      local fields = vim.split(stdout, "\0", { plain = true })
+      staged = util.nonblank(fields[1])
+      local remote_sources = {}
+      for i = 2, #fields do
+        if fields[i] ~= "" then
+          remote_sources[#remote_sources + 1] = M.glob_escape(staged .. "/" .. fields[i])
+        end
+      end
+      if not staged or #remote_sources == 0 then
+        return done(false, "nothing was copied")
+      end
+      step(M.scp_argv("get", h, remote_sources, sources[1], { batch = true }), nil, function(ok, _, err)
+        done(ok, (not ok) and err or nil)
+      end)
+    end)
+  end
+
+  return {
+    cancel = function()
+      cancelled = true
+      if proc then
+        pcall(function()
+          proc:kill(15)
+        end)
+      end
+    end,
+  }
+end
+
+--- scp was refused a protected path: offer to redo the copy with sudo, as
+--- `remote.sudo` allows. `proceed` runs on a yes, `decline` otherwise.
+---@param h ssh_launcher.Host
+---@param err string what scp said
+---@param proceed fun()
+---@param decline fun()
+function M.offer_sudo(h, err, proceed, decline)
+  local cfg = require("ssh_launcher.config").get()
+  if (cfg.remote or {}).sudo == "never" then
+    return decline()
+  end
+  require("ssh_launcher.ui.dialog").confirm({
+    title = "Permission denied — retry with sudo?",
+    lines = {
+      M.is_permission_error(err) or util.trim(err),
+      "",
+      ("The copy can be redone as root on %s, through a private"):format(Host.label(h)),
+      "staging directory that is removed afterwards.",
+    },
+    yes = "Retry with sudo",
+    no = "Cancel",
+    destructive = true,
+  }, function(confirmed)
+    if confirmed then
+      proceed()
+    else
+      decline()
+    end
+  end)
 end
 
 ---@param paths string[]
@@ -584,19 +921,41 @@ local function transfer(direction, h, remote_path, local_paths, cb)
     width = 0.7,
     height = 12,
     close_on_exit = true,
-    on_exit = function(code)
-      if code == 0 then
+    on_exit = function(code, term)
+      local function succeeded(how)
         local msg
         if direction == "get" then
           msg = ("downloaded %s:%s to %s"):format(label, remote_path, util.contract(util.expand(sources[1])))
         else
           msg = ("uploaded %s to %s:%s"):format(describe_sources(sources), label, remote_path)
         end
+        msg = msg .. (how or "")
         log.info(msg)
         cb(true, msg)
-      else
-        cb(false, ("scp exited with %d"):format(code))
       end
+      if code == 0 then
+        return succeeded()
+      end
+
+      local failure = ("scp exited with %d"):format(code)
+      local denied = M.is_permission_error(term and term.output)
+      if not denied then
+        return cb(false, failure)
+      end
+      M.offer_sudo(h, denied, function()
+        with_auth(h, function()
+          log.announce(("copying with sudo on %s…"):format(label))
+          M.copy_elevated(direction, h, remote_path, sources, function(ok, err)
+            if ok then
+              return succeeded(" (with sudo)")
+            end
+            log.error(("sudo copy failed: %s"):format(err or "unknown error"))
+            cb(false, err or failure)
+          end)
+        end)
+      end, function()
+        cb(false, denied)
+      end)
     end,
   })
 end

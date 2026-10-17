@@ -343,6 +343,16 @@ Safeguards~
   - Closing the window while a copy runs lets it finish; the result is still
     reported.
 
+Protected paths~
+When scp is refused a path ("Permission denied" on /etc, /var/www, a
+root-owned file), any copy — `:Ssh upload`, `:Ssh download` or this window —
+offers to redo it with sudo on the host. scp cannot run as root itself, so the
+files pass through a private staging directory owned by the login user, which
+is removed afterwards. A file that already exists keeps its owner and mode;
+new files belong to root, as with `sudo cp`. If sudo wants a password it is
+asked for once and passed to sudo on stdin, never stored. Set
+`remote.sudo = "never"` to only report the failure.
+
 Configured remote Neovim                         *ssh-launcher-remote-neovim*
 Press `n` on a host, or run `:Ssh workspace {name} {path}`. The plugin packages
 the configuration directory used by the current Neovim, transfers it with scp,
@@ -701,6 +711,7 @@ Defaults in full: >lua
       remote = {
         adapter = "builtin", -- builtin | oil | netrw | auto
         timeout = 30000,      -- ms for list, read and write operations
+        sudo = "ask",         -- ask | never: retry refused copies with sudo
       },
 
       workspace = {

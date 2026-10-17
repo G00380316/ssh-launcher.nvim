@@ -2439,6 +2439,143 @@ end)
 suite("health")
 --------------------------------------------------------------------------------
 
+test("a refused path is told apart from a refused login", function()
+  local remote = require("ssh_launcher.remote")
+  eq(remote.is_permission_error("scp: /etc/hosts: Permission denied"), "scp: /etc/hosts: Permission denied")
+  truthy(remote.is_permission_error('scp: dest open "/srv/x": Permission denied\nscp: failed to upload'))
+  falsy(remote.is_permission_error("me@box: Permission denied (publickey,password)."), "a login failure")
+  falsy(remote.is_permission_error("scp: /x: No such file or directory"))
+  falsy(remote.is_permission_error(nil))
+end)
+
+test("a copy refused a protected path is redone with sudo", function()
+  local remote = require("ssh_launcher.remote")
+  local dialog = require("ssh_launcher.ui.dialog")
+
+  local runner = TMP .. "/fake-sudo-ssh"
+  vim.fn.writefile({ "#!/bin/sh", 'for arg in "$@"; do command="$arg"; done', 'exec sh -c "$command"' }, runner)
+  vim.uv.fs_chmod(runner, tonumber("755", 8))
+
+  -- scp that really copies, but is refused anything under a `locked` directory;
+  -- sudo that wants the password "pw" whenever FAKE_SUDO_PW is set.
+  local bin = TMP .. "/sudo-bin"
+  vim.fn.mkdir(bin, "p")
+  vim.fn.writefile({
+    "#!/bin/sh",
+    'while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift',
+    "set -- $(for a in \"$@\"; do printf '%s\\n' \"$a\" | sed -e 's/^[^/:]*@[^:]*://' -e 's/\\\\\\(.\\)/\\1/g'; done)",
+    'for a in "$@"; do case "$a" in */locked*) printf \'scp: %s: Permission denied\\n\' "$a" >&2; exit 1 ;; esac; done',
+    'exec cp -Rp "$@"',
+  }, bin .. "/scp")
+  vim.fn.writefile({
+    "#!/bin/sh",
+    'mode=n; while [ "$1" != "--" ]; do [ "$1" = -S ] && mode=S; shift; done; shift',
+    'if [ -n "$FAKE_SUDO_PW" ]; then',
+    '  [ $mode = n ] && { echo "sudo: a password is required" >&2; exit 1; }',
+    '  read -r given; [ "$given" = "$FAKE_SUDO_PW" ] || { echo "Sorry, try again." >&2; exit 1; }',
+    "fi",
+    'exec "$@"',
+  }, bin .. "/sudo")
+  vim.uv.fs_chmod(bin .. "/scp", tonumber("755", 8))
+  vim.uv.fs_chmod(bin .. "/sudo", tonumber("755", 8))
+  local original_path, original_tmpdir = vim.env.PATH, vim.env.TMPDIR
+  vim.env.PATH = bin .. ":" .. original_path
+  local stage_root = TMP .. "/stage-root"
+  vim.fn.mkdir(stage_root, "p")
+  vim.env.TMPDIR = stage_root
+
+  local original_confirm, original_ask = dialog.confirm, remote.ask_sudo_password
+  local offers, asked = 0, 0
+  local answer = true
+  dialog.confirm = function(_, cb)
+    offers = offers + 1
+    cb(answer)
+  end
+  remote.ask_sudo_password = function(_, cb)
+    asked = asked + 1
+    cb("pw")
+  end
+
+  local ok_all, err_all = pcall(function()
+    configure({ ssh = { binary = runner }, remote = { adapter = "builtin", timeout = 3000 } })
+    local h = { name = "sudo-host", host = "example.invalid", user = "me" }
+
+    local here, locked = TMP .. "/sudo-local", TMP .. "/locked"
+    vim.fn.mkdir(here, "p")
+    vim.fn.mkdir(locked .. "/conf.d", "p")
+    vim.fn.writefile({ "new" }, here .. "/app.conf")
+    vim.fn.writefile({ "old" }, locked .. "/existing.conf")
+    vim.uv.fs_chmod(locked .. "/existing.conf", tonumber("640", 8))
+    vim.fn.writefile({ "secret" }, locked .. "/conf.d/[x].conf")
+
+    local function copy(direction, remote_path, local_paths)
+      local result
+      remote.copy(direction, h, remote_path, local_paths, function(ok, err)
+        result = { ok = ok, err = err }
+      end)
+      truthy(
+        vim.wait(5000, function()
+          return result ~= nil
+        end),
+        "the copy finished"
+      )
+      return result
+    end
+
+    -- Upload into a directory, and over an existing file whose mode must stay.
+    local res = copy("put", locked .. "/", { here .. "/app.conf" })
+    truthy(res.ok, "upload with sudo: " .. tostring(res.err))
+    eq(vim.fn.readfile(locked .. "/app.conf"), { "new" })
+    eq(offers, 1, "asked once before using sudo")
+    eq(asked, 0, "passwordless sudo needs no password")
+
+    res = copy("put", locked .. "/existing.conf", { here .. "/app.conf" })
+    truthy(res.ok, tostring(res.err))
+    eq(vim.fn.readfile(locked .. "/existing.conf"), { "new" })
+    eq(vim.uv.fs_stat(locked .. "/existing.conf").mode % 512, tonumber("640", 8), "the replaced file keeps its mode")
+
+    -- Download a directory and a glob-escaped name, with a password this time.
+    vim.env.FAKE_SUDO_PW = "pw"
+    local dest = TMP .. "/sudo-down"
+    vim.fn.mkdir(dest, "p")
+    res = copy("get", { locked .. "/conf.d", remote.glob_escape(locked .. "/conf.d/[x].conf") }, { dest })
+    truthy(res.ok, "download with sudo: " .. tostring(res.err))
+    eq(vim.fn.readfile(dest .. "/conf.d/[x].conf"), { "secret" })
+    eq(vim.fn.readfile(dest .. "/[x].conf"), { "secret" })
+    eq(asked, 1, "the password was asked for once")
+
+    -- A wrong password is reported as such.
+    remote.ask_sudo_password = function(_, cb)
+      cb("nope")
+    end
+    res = copy("put", locked .. "/", { here .. "/app.conf" })
+    falsy(res.ok)
+    contains(res.err, "did not accept the password")
+    vim.env.FAKE_SUDO_PW = nil
+
+    eq(vim.fn.readdir(stage_root), {}, "every staging directory was removed")
+
+    -- Declining, or remote.sudo = "never", leaves scp's own error.
+    answer = false
+    res = copy("put", locked .. "/", { here .. "/app.conf" })
+    falsy(res.ok)
+    contains(res.err, "Permission denied")
+    configure({ ssh = { binary = runner }, remote = { adapter = "builtin", timeout = 3000, sudo = "never" } })
+    local before = offers
+    res = copy("put", locked .. "/", { here .. "/app.conf" })
+    falsy(res.ok)
+    eq(offers, before, "never offers sudo")
+  end)
+
+  dialog.confirm, remote.ask_sudo_password = original_confirm, original_ask
+  vim.env.PATH, vim.env.TMPDIR, vim.env.FAKE_SUDO_PW = original_path, original_tmpdir, nil
+  if not ok_all then
+    error(err_all, 0)
+  end
+end)
+
+--------------------------------------------------------------------------------
+
 test("checkhealth runs end to end", function()
   vim.wait(60, function()
     return false

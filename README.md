@@ -256,6 +256,7 @@ require("ssh_launcher").setup({
   remote = {
     adapter = "builtin",                      -- builtin | oil | netrw | auto
     timeout = 30000,
+    sudo = "ask",                             -- ask | never: retry "Permission denied" copies as root
   },
   workspace = {
     config_dir = vim.fn.stdpath("config"),

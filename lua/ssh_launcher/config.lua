@@ -121,6 +121,10 @@ M.defaults = {
     --- Network operations are deliberately bounded: a dead host must not
     --- leave an editor buffer stuck in a loading or writing state forever.
     timeout = 30000,
+    --- When scp is refused a protected path ("Permission denied" on /etc,
+    --- /var/www, a root-owned file), "ask" offers to redo the copy through
+    --- sudo on the host; "never" just reports the failure.
+    sudo = "ask",
   },
 
   ---------------------------------------------------------------------------
@@ -367,6 +371,7 @@ local enums = {
   ["terminal.protect"] = { "auto", true, false },
   ["terminal.strategy"] = { "tab", "float", "vsplit", "split", "current", "tmux" },
   ["remote.adapter"] = { "builtin", "oil", "netrw", "auto" },
+  ["remote.sudo"] = { "ask", "never" },
   ["workspace.strategy"] = { "tab", "float", "vsplit", "split", "current", "tmux" },
   ["ui.sort"] = { "frecency", "name", "recent", "host", "manual" },
   ["ui.picker"] = { "manager", "telescope", "fzf-lua", "snacks", "select", "auto" },
