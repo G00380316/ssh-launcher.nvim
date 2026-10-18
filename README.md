@@ -195,7 +195,7 @@ those prompts. The manager's `U`/`W` use the same flow. See
 browse than type paths:
 
 ```
-┌ > Local  ~/projects/site ─────────┐┌   web-01  /srv/app ───────────────┐
+┌ -> FROM Local · ~/projects/site ──┐┌  TO web-01 · /srv/app ────────────┐
 │    ../                            ││    ../                            │
 │    docs/                          ││    backups/                       │
 │    dist/                          ││    logs/                          │
@@ -203,6 +203,7 @@ browse than type paths:
 │[x] app.js                 340K    ││    app.js                 338K    │
 │    README.md              1.2K    ││    server.conf            2.3K    │
 └─────────── 5 items · 2 selected ──┘└───────────────────────── 6 items ─┘
+ c Upload 2 selected (352K)  Local:~/projects/site -> web-01:/srv/app
  <Tab> switch   <Space> select   c copy   m mkdir   go path   ? help   q quit
 ```
 
@@ -211,7 +212,9 @@ file under the cursor) into the directory the **other** pane is showing — so
 copying from the left pane uploads and from the right pane downloads, with no
 path to type. `m` makes a directory, `go` jumps to a typed path, `.` toggles
 dotfiles, `x` cancels. Existing files at the destination are listed and need a
-yes; production hosts ask before an upload.
+yes; production hosts ask before an upload. The active pane is titled **FROM**
+and the other **TO**, and the line under the panes says exactly what `c` would
+copy and where before you press it.
 
 Copies run in the background: the status line shows what is moving and for how
 long, further copies queue behind it, and the destination pane refreshes when
@@ -256,6 +259,7 @@ require("ssh_launcher").setup({
   remote = {
     adapter = "builtin",                      -- builtin | oil | netrw | auto
     timeout = 30000,
+    sudo = "ask",                             -- ask | never: retry "Permission denied" copies as root
   },
   workspace = {
     config_dir = vim.fn.stdpath("config"),
