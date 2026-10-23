@@ -355,6 +355,9 @@ is removed afterwards. A file that already exists keeps its owner and mode;
 new files belong to root, as with `sudo cp`. If sudo wants a password it is
 asked for once and passed to sudo on stdin, never stored. Set
 `remote.sudo = "never"` to only report the failure.
+For an upload the prompt also offers "Take ownership": `sudo chown` the
+destination folder to your login user (passwordless sudo needed), then upload
+normally, so later uploads there need no sudo.
 
 Configured remote Neovim                         *ssh-launcher-remote-neovim*
 Press `n` on a host, or run `:Ssh workspace {name} {path}`. The plugin packages

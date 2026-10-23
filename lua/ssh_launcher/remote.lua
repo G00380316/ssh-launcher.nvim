@@ -224,6 +224,31 @@ function M.mkdir(h, path, cb)
   end)
 end
 
+--- Make the login user own a directory on the host, so an upload into it stops
+--- failing with "Permission denied". It needs passwordless sudo, because the
+--- command runs unattended; without that the error says what to run by hand.
+---@param h ssh_launcher.Host
+---@param path string
+---@param cb fun(ok: boolean, err: string|nil)
+function M.take_ownership(h, path, cb)
+  local command = table.concat({
+    "path=" .. M.shell_quote(path),
+    [[case "$path" in '~') path=$HOME ;; '~/'*) path="$HOME/${path#\~/}" ;; -*) path="./$path" ;; esac]],
+    [[me=$(id -un)]],
+    [[if [ -O "$path" ]; then chmod u+rwx "$path"; else sudo -n chown "$me" "$path" && chmod u+rwx "$path"; fi]],
+  }, "; ")
+  run(h, command, nil, function(res)
+    if res.ok then
+      return cb(true, nil)
+    end
+    local detail = result_error(res, "could not change the owner")
+    if detail:find("password is required", 1, true) or detail:find("terminal is required", 1, true) then
+      detail = "sudo asks for a password here; run on the host: sudo chown $USER " .. path
+    end
+    cb(false, detail)
+  end)
+end
+
 --- Escape the characters scp would otherwise read as a glob in a remote path
 --- that is a literal name — a file called `report[1].txt` or `*`.
 ---@param path string
@@ -537,7 +562,18 @@ function M.copy(direction, h, remote_path, local_paths, cb)
         handle.cancel = M.copy_elevated(direction, h, remote_path, local_paths, cb).cancel
       end, function()
         cb(false, err)
-      end)
+      end, direction == "put" and type(remote_path) == "string" and function()
+        if cancelled then
+          return cb(false, "cancelled")
+        end
+        M.take_ownership(h, remote_path, function(ok, detail)
+          if not ok then
+            return cb(false, detail)
+          end
+          -- Now the login user's own directory: the plain copy is enough.
+          handle.cancel = M.copy(direction, h, remote_path, local_paths, cb).cancel
+        end)
+      end or nil)
     end)
   end)
   if not started then
@@ -857,29 +893,42 @@ end
 ---@param err string what scp said
 ---@param proceed fun()
 ---@param decline fun()
-function M.offer_sudo(h, err, proceed, decline)
+---@param own fun()|nil for an upload: make the login user own the destination instead
+function M.offer_sudo(h, err, proceed, decline, own)
   local cfg = require("ssh_launcher.config").get()
   if (cfg.remote or {}).sudo == "never" then
     return decline()
   end
-  require("ssh_launcher.ui.dialog").confirm({
-    title = "Permission denied — retry with sudo?",
-    lines = {
-      M.is_permission_error(err) or util.trim(err),
-      "",
-      ("The copy can be redone as root on %s, through a private"):format(Host.label(h)),
-      "staging directory that is removed afterwards.",
-    },
-    yes = "Retry with sudo",
-    no = "Cancel",
-    destructive = true,
-  }, function(confirmed)
-    if confirmed then
-      proceed()
-    else
-      decline()
-    end
-  end)
+  local lines = {
+    M.is_permission_error(err) or util.trim(err),
+    "",
+    ("The copy can be redone as root on %s, through a private"):format(Host.label(h)),
+    "staging directory that is removed afterwards.",
+  }
+  local choices = {
+    { label = "Retry with sudo", value = "sudo", key = "s", desc = "files end up owned by root", destructive = true },
+  }
+  if own then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Or make your login user own the destination folder (sudo chown),"
+    lines[#lines + 1] = "so this and later uploads there work without sudo."
+    choices[#choices + 1] = { label = "Take ownership", value = "own", key = "o", desc = "sudo chown the folder, then upload" }
+  end
+  choices[#choices + 1] = { label = "Cancel", value = "cancel", key = "n" }
+  require("ssh_launcher.ui.dialog").choose({
+    title = "Permission denied",
+    lines = lines,
+    choices = choices,
+    on_choice = function(value)
+      if value == "sudo" then
+        proceed()
+      elseif value == "own" then
+        own()
+      else
+        decline()
+      end
+    end,
+  })
 end
 
 ---@param paths string[]
