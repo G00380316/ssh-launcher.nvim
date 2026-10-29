@@ -539,7 +539,17 @@ function Pane:mkdir()
       local ok, err = pcall(vim.fn.mkdir, full, "p")
       made(ok, not ok and tostring(err) or nil)
     else
-      remote.mkdir(self.c.host, full, made)
+      local host = self.c.host
+      remote.mkdir(host, full, function(ok, err)
+        if ok then
+          return made(true, nil)
+        end
+        remote.offer_elevated(host, "create " .. name, err or "", function()
+          remote.mkdir_elevated(host, full, made)
+        end, function()
+          made(false, err)
+        end)
+      end)
     end
   end)
 end

@@ -359,6 +359,12 @@ For an upload the prompt also offers "Take ownership": `sudo chown` the
 destination folder to your login user (passwordless sudo needed), then upload
 normally, so later uploads there need no sudo.
 
+    The same "Permission denied — retry with sudo?" prompt appears when making
+    a folder in the transfer window (`m`) or saving a remote file you opened for
+    editing. The folder is handed to your login user afterwards; a saved file
+    keeps its owner and mode (a file that did not exist is handed to you). A
+    sudo password is asked for once and never stored.
+
 Configured remote Neovim                         *ssh-launcher-remote-neovim*
 Press `n` on a host, or run `:Ssh workspace {name} {path}`. The plugin packages
 the configuration directory used by the current Neovim, transfers it with scp,

@@ -184,7 +184,7 @@ local function save_file(buf)
   local tick = vim.api.nvim_buf_get_changedtick(buf)
   local data = M.encode(buf)
   log.info(("writing %s to %s…"):format(state.path, Host.label(state.host)))
-  remote.write(state.host, state.path, data, function(ok, err)
+  local function written(ok, err)
     if not vim.api.nvim_buf_is_valid(buf) then
       return
     end
@@ -199,6 +199,16 @@ local function save_file(buf)
     else
       log.warn(("wrote %s, but the buffer has newer unsaved changes"):format(state.path))
     end
+  end
+  remote.write(state.host, state.path, data, function(ok, err)
+    if ok then
+      return written(true, nil)
+    end
+    remote.offer_elevated(state.host, "save " .. util.basename(state.path), err or "", function()
+      remote.write_elevated(state.host, state.path, data, written)
+    end, function()
+      written(false, err)
+    end)
   end)
 end
 

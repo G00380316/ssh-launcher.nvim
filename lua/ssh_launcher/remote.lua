@@ -931,6 +931,103 @@ function M.offer_sudo(h, err, proceed, decline, own)
   })
 end
 
+--- Run a root script on the host: `sudo sh -c <script> sh "$path" <uid> <gid>`,
+--- where uid and gid are the login user's, so what root makes can be handed back.
+--- sudo's password, if it wants one, is asked for once and sent on stdin ahead of
+--- `data`; it is never stored.
+---@param h ssh_launcher.Host
+---@param path string
+---@param script string
+---@param data string|nil what the script reads on stdin
+---@param cb fun(ok: boolean, err: string|nil)
+local function as_root_on(h, path, script, data, cb)
+  local function attempt(password)
+    local command = table.concat({
+      "p=" .. M.shell_quote(path),
+      expand_var("p"),
+      ('%s sh -c %s sh "$p" "$(id -u)" "$(id -g)"'):format(sudo(password), M.shell_quote(script)),
+    }, "\n")
+    local stdin = password and (password .. "\n" .. (data or "")) or data
+    local ok_run, proc_or_err = pcall(vim.system, M.command_argv(h, command), { text = false, stdin = stdin }, function(res)
+      vim.schedule(function()
+        if res.code == 0 then
+          return cb(true, nil)
+        end
+        local err = result_error(res, "the command failed")
+        if not password and wants_password(err) then
+          return M.ask_sudo_password(h, function(given)
+            if not given then
+              return cb(false, "sudo needs a password and none was given")
+            end
+            attempt(given)
+          end)
+        end
+        if password and (err:find("incorrect password", 1, true) or err:find("Sorry, try again", 1, true)) then
+          err = "sudo did not accept the password"
+        end
+        cb(false, err)
+      end)
+    end)
+    if not ok_run then
+      vim.schedule(function()
+        cb(false, tostring(proc_or_err))
+      end)
+    end
+  end
+  attempt(nil)
+end
+
+--- Create a directory as root and give it to the login user, for a folder the
+--- login user cannot create in. Only the folder itself is handed over; parents
+--- that had to be made stay root's.
+---@param h ssh_launcher.Host
+---@param path string
+---@param cb fun(ok: boolean, err: string|nil)
+function M.mkdir_elevated(h, path, cb)
+  as_root_on(h, path, [[mkdir -p -- "$1" && chown "$2:$3" "$1"]], nil, cb)
+end
+
+--- Write a file as root, for one the login user cannot write. An existing file is
+--- rewritten in place, so it keeps its owner and mode; a new one is handed to the
+--- login user. (Unlike |ssh_launcher.remote.write| this is not atomic.)
+---@param h ssh_launcher.Host
+---@param path string
+---@param data string
+---@param cb fun(ok: boolean, err: string|nil)
+function M.write_elevated(h, path, data, cb)
+  as_root_on(h, path, [[if [ -e "$1" ]; then cat > "$1"; else cat > "$1" && chown "$2:$3" "$1"; fi]], data, cb)
+end
+
+--- Something other than a copy was refused (a new folder, a saved file): offer
+--- to redo it with sudo, as `remote.sudo` allows.
+---@param h ssh_launcher.Host
+---@param what string e.g. "create docs" or "save notes.md"
+---@param err string what the host said
+---@param proceed fun()
+---@param decline fun()
+function M.offer_elevated(h, what, err, proceed, decline)
+  if ((require("ssh_launcher.config").get().remote or {}).sudo) == "never" or not M.is_permission_error(err) then
+    return decline()
+  end
+  require("ssh_launcher.ui.dialog").confirm({
+    title = "Permission denied — retry with sudo?",
+    lines = {
+      M.is_permission_error(err),
+      "",
+      ("%s can be redone as root on %s."):format(what:sub(1, 1):upper() .. what:sub(2), Host.label(h)),
+    },
+    yes = "Retry with sudo",
+    no = "Cancel",
+    destructive = true,
+  }, function(confirmed)
+    if confirmed then
+      proceed()
+    else
+      decline()
+    end
+  end)
+end
+
 ---@param paths string[]
 ---@return string
 local function describe_sources(paths)
