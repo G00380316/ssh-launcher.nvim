@@ -274,6 +274,34 @@ function M.read(h, path, cb)
   end)
 end
 
+--- Turn what someone typed or yanked (`~/x`, `x`, `../x`) into an absolute
+--- remote path, and say whether it is a folder. A bare name is taken relative
+--- to the login directory: the session's own working directory is not known.
+---@param h ssh_launcher.Host
+---@param path string
+---@param cb fun(path: string|nil, is_dir: boolean|nil, err: string|nil)
+function M.resolve(h, path, cb)
+  local command = table.concat({
+    "path=" .. M.shell_quote(path),
+    [[case "$path" in '~') path=$HOME ;; '~/'*) path="$HOME/${path#\~/}" ;; /*) ;; *) path="$HOME/$path" ;; esac]],
+    [[if [ -d "$path" ]; then t=d; d=$path; b=; else t=f; d=${path%/*}; b=${path##*/}; fi]],
+    [[[ -n "$d" ] || d=/]],
+    [[d=$(cd "$d" 2>/dev/null && pwd -P) || exit 3]],
+    [[if [ -n "$b" ]; then case "$d" in /) full="/$b" ;; *) full="$d/$b" ;; esac; else full=$d; fi]],
+    [[printf '%s\n%s' "$t" "$full"]],
+  }, "; ")
+  run(h, command, { text = true }, function(res)
+    if not res.ok then
+      return cb(nil, nil, result_error(res, "no such place on the host"))
+    end
+    local kind, full = (res.stdout or ""):match("^(%a)\n(.+)$")
+    if not full then
+      return cb(nil, nil, "could not resolve " .. path)
+    end
+    cb(full, kind == "d", nil)
+  end)
+end
+
 --- Atomically replace a remote file where possible. Existing permissions are
 --- copied to the temporary file; symlinks are written through rather than
 --- replaced. New files are created private.

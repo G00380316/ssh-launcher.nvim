@@ -477,6 +477,18 @@ local function launch(h, opts)
 
   sessions[id] = { id = id, host = h, handle = handle, started_at = started }
 
+  -- So `:Ssh open` and `gf` know which host this window is talking to.
+  if handle.buf and vim.api.nvim_buf_is_valid(handle.buf) then
+    vim.b[handle.buf].ssh_launcher_host = h.id
+    vim.keymap.set("n", "gf", function()
+      local path = vim.fn.expand("<cfile>")
+      if path == "" then
+        return
+      end
+      require("ssh_launcher").open(nil, path)
+    end, { buffer = handle.buf, silent = true, desc = "ssh-launcher: open the path under the cursor from this host" })
+  end
+
   if h.source == "store" then
     store.touch(h.id)
   end

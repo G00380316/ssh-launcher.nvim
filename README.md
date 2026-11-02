@@ -157,6 +157,7 @@ read-only. Press `i` to import them for editing.
 | `:Ssh sessions` | Jump to a running session |
 | `:Ssh browse [name] [path]` | Browse and edit a host's files in the editor |
 | `:Ssh transfer [name] [path]` | Two panes: browse this machine and a host, copy across |
+| `:Ssh open [name] {path}` | Open one file (or folder) from a host in your editor. In a session window the host is implied, and `gf` opens the path under the cursor. Bare names are relative to the login directory |
 | `:Ssh upload [name] {local}… [remote]` | Send files or directories to a host |
 | `:Ssh download [name] {remote} [local]` | Fetch a file or directory from a host |
 | `:Ssh workspace [name] [path]` | Launch remote Neovim with your local configuration |

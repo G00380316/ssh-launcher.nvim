@@ -321,6 +321,48 @@ function M.browse(name, path)
   end)
 end
 
+--- Open a file (or folder) from a host in this editor. `where` may be an
+--- absolute path, `~/x`, or a name under the login directory. Without a host
+--- name it uses the host of the session you are in.
+---@param name string|nil
+---@param where string
+---@param command string|nil edit, split, vsplit, tabedit
+function M.open(name, where, command)
+  M.ensure_setup()
+  local log = require("ssh_launcher.log")
+  local store = require("ssh_launcher.store")
+  if not where or where == "" then
+    return log.error("usage: :Ssh open [{host}] {path}")
+  end
+  local function go(h)
+    require("ssh_launcher.remote").resolve(h, where, function(full, is_dir, err)
+      if err then
+        return log.error(err)
+      end
+      vim.schedule(function()
+        if is_dir then
+          require("ssh_launcher.remote").browse(h, full)
+        else
+          require("ssh_launcher.ui.remote").edit(h, full, { command = command or "edit" })
+        end
+      end)
+    end)
+  end
+  if name then
+    local h = store.get_by_name(name)
+    if not h then
+      return log.error(("no host matches %q"):format(name))
+    end
+    return go(h)
+  end
+  local id = vim.b.ssh_launcher_host
+  local h = id and store.get(id)
+  if h then
+    return go(h)
+  end
+  require("ssh_launcher.ui.picker").pick(go)
+end
+
 --- Run `fn` with the saved host called `name`, or with one the user picks.
 ---@param name string|nil
 ---@param fn fun(h: ssh_launcher.Host)
@@ -808,6 +850,18 @@ local SUBCOMMANDS = {
     run = function(args)
       local name, path = host_and_path(args)
       M.browse(name, path)
+    end,
+  },
+  open = {
+    desc = "Open a file from a host in the editor: open [{host}] {path}",
+    complete = "host",
+    run = function(args)
+      local name, path = host_and_path(args)
+      if not name or not path then
+        -- No host named: the whole argument is the path, for the current session.
+        return M.open(nil, table.concat(args, " "))
+      end
+      M.open(name, path)
     end,
   },
   upload = {

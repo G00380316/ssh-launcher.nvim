@@ -126,6 +126,12 @@ edit them.
                         `~/.ssh/config`.
 :Ssh agent              Inspect and manage ssh-agent identities.
 :Ssh sessions           Jump to a running session.
+:Ssh open [{name}] {path}
+    Open a file from a host as a buffer in this Neovim (`:w` saves it back);
+    a folder opens the browser. Inside a session window the host is the
+    session's, and `gf` on a path in the terminal output does the same.
+    `~/x` and absolute paths work; a bare name is under the login directory.
+
 :Ssh browse [{name} [{path}]]
                         Browse and edit a host's files over SSH. {path} defaults
                         to the host's Remote dir, then its home directory.
