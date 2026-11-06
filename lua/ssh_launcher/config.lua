@@ -125,6 +125,11 @@ M.defaults = {
     --- /var/www, a root-owned file), "ask" offers to redo the copy through
     --- sudo on the host; "never" just reports the failure.
     sudo = "ask",
+    --- With adapter = "oil": a function(url, info) that shows an `oil-ssh://`
+    --- address, for configurations that keep oil in a particular window.
+    --- `info.dir` says whether it is a folder; `info.command` is the editor
+    --- command (edit, split…) asked for a file. Unset, it is just `:edit`.
+    open = nil,
   },
 
   ---------------------------------------------------------------------------

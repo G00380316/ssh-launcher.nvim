@@ -68,6 +68,18 @@ function M.oil_url(h, path, cb)
   end)
 end
 
+--- Show an `oil-ssh://` address: through the configured `remote.open`, else `:edit`.
+---@param url string
+---@param info { dir: boolean, command: string|nil }
+---@return boolean ok, string|nil err
+function M.show_oil(url, info)
+  local open = (require("ssh_launcher.config").get().remote or {}).open
+  if type(open) == "function" then
+    return pcall(open, url, info)
+  end
+  return pcall(vim.cmd, (info.command or "edit") .. " " .. vim.fn.fnameescape(url))
+end
+
 ---@param name string
 ---@return boolean
 local function adapter_available(name)
@@ -451,7 +463,7 @@ function M.browse(h, path)
 
   if adapter == "oil" then
     M.oil_url(h, path, function(url)
-      local ok, err = pcall(vim.cmd.edit, url)
+      local ok, err = M.show_oil(url, { dir = true })
       if ok then
         log.announce(("browsing %s on %s"):format(path, Host.label(h)))
       else

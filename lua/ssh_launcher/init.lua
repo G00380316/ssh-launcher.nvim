@@ -346,7 +346,10 @@ function M.open(name, where, command)
         elseif remote.adapter() == "oil" then
           -- oil's own buffer: it reads and writes through scp
           remote.oil_url(h, full, function(url)
-            vim.cmd((command or "edit") .. " " .. vim.fn.fnameescape(url))
+            local ok, err = remote.show_oil(url, { dir = false, command = command })
+            if not ok then
+              log.error(tostring(err))
+            end
           end)
         else
           require("ssh_launcher.ui.remote").edit(h, full, { command = command or "edit" })
