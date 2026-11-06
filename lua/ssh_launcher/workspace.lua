@@ -20,8 +20,19 @@ local confirmed_hosts = {}
 ---@param archive string
 ---@param excludes string[]|nil
 ---@return string[]
+local bsdtar
 function M.bundle_argv(config_dir, archive, excludes)
   local argv = { "tar", "-czhf", archive }
+  -- macOS tar (libarchive) stamps extended attributes such as
+  -- com.apple.provenance into the archive; GNU tar on the server answers
+  -- every one with a warning and the real error is lost in the noise.
+  if bsdtar == nil then
+    bsdtar = (vim.fn.system({ "tar", "--version" }) or ""):find("bsdtar", 1, true) ~= nil
+  end
+  if bsdtar then
+    argv[#argv + 1] = "--no-xattrs"
+    argv[#argv + 1] = "--no-mac-metadata"
+  end
   for _, pattern in ipairs(excludes or {}) do
     argv[#argv + 1] = "--exclude=" .. pattern
   end
