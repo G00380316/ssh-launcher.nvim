@@ -340,8 +340,14 @@ function M.open(name, where, command)
         return log.error(err)
       end
       vim.schedule(function()
+        local remote = require("ssh_launcher.remote")
         if is_dir then
-          require("ssh_launcher.remote").browse(h, full)
+          remote.browse(h, full)
+        elseif remote.adapter() == "oil" then
+          -- oil's own buffer: it reads and writes through scp
+          remote.oil_url(h, full, function(url)
+            vim.cmd((command or "edit") .. " " .. vim.fn.fnameescape(url))
+          end)
         else
           require("ssh_launcher.ui.remote").edit(h, full, { command = command or "edit" })
         end

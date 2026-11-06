@@ -25,6 +25,49 @@ local function authority(h, with_port)
   return target
 end
 
+--- The `oil-ssh://` address of `path` on a host. oil runs plain `ssh`/`scp`, so
+--- only user, host and port travel in the URL; a host that also needs a key, a
+--- jump host or other options is reached by its alias in ~/.ssh/config, which
+--- the managed export writes (after asking once).
+---@param h ssh_launcher.Host
+---@param path string absolute, or relative to the login directory
+---@param cb fun(url: string)
+function M.oil_url(h, path, cb)
+  local function url(authority_text)
+    -- oil's double slash marks an absolute path; one slash is the home dir.
+    return ("oil-ssh://%s/%s"):format(authority_text, path == "." and "" or path)
+  end
+  local alias = (h.name or h.host):gsub("%s+", "-")
+  if h.source == "ssh_config" then
+    return cb(url(alias))
+  end
+  local plain = not h.identity_file and not h.proxy_jump and next(h.options or {}) == nil
+  if plain then
+    return cb(url(authority(h, true)))
+  end
+  local exported = (util.read_file(util.expand(require("ssh_launcher.config").get().ssh_config.path)) or "")
+    :find("Host " .. alias .. "\n", 1, true)
+  if exported then
+    return cb(url(alias))
+  end
+  require("ssh_launcher.ui.dialog").confirm({
+    title = "Add saved hosts to ~/.ssh/config?",
+    lines = {
+      "Oil connects with plain ssh, which reads its key and jump host",
+      "from ~/.ssh/config. " .. Host.label(h) .. " needs that, so the saved hosts are",
+      "written into the ssh-launcher block there (a .bak copy is kept).",
+    },
+    yes = "Add them",
+    no = "Cancel",
+  }, function(confirmed)
+    if not confirmed then
+      return
+    end
+    require("ssh_launcher").export()
+    cb(url(alias))
+  end)
+end
+
 ---@param name string
 ---@return boolean
 local function adapter_available(name)
@@ -407,14 +450,15 @@ function M.browse(h, path)
   end
 
   if adapter == "oil" then
-    local url = ("oil-ssh://%s/%s"):format(authority(h, true), (path:gsub("^/", "")))
-    local ok, err = pcall(vim.cmd.edit, url)
-    if ok then
-      log.announce(("browsing %s on %s"):format(path, Host.label(h)))
-      return true
-    end
-    log.error(("oil could not open %s: %s"):format(url, tostring(err)))
-    return false
+    M.oil_url(h, path, function(url)
+      local ok, err = pcall(vim.cmd.edit, url)
+      if ok then
+        log.announce(("browsing %s on %s"):format(path, Host.label(h)))
+      else
+        log.error(("oil could not open %s: %s"):format(url, tostring(err)))
+      end
+    end)
+    return true
   end
 
   if adapter == "netrw" then

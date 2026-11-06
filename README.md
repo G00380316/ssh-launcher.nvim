@@ -93,6 +93,14 @@ forwarding off by default, and never writes key material anywhere.
 - **`:checkhealth ssh_launcher`** that checks your whole setup, not just the
   plugin's.
 
+### Browsing in oil
+
+With `remote = { adapter = "oil" }`, `:Ssh browse` and `:Ssh open` use oil's
+`oil-ssh://` buffers, so remote folders and files are edited in your own Neovim
+exactly like local ones. oil runs plain `ssh`/`scp`; a host that needs a key,
+jump host or options is reached through its alias in `~/.ssh/config`, and the
+plugin offers (once) to write the saved hosts into its managed block there.
+
 ## Requirements
 
 Neovim **0.10+** and the OpenSSH client. Configured remote workspaces also need
